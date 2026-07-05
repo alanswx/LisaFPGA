@@ -821,7 +821,9 @@ always @(posedge clk)
  * Update D flag
  */
 always @(posedge clk, posedge reset) // AlexTheCat123: Added async reset for LisaFPGA
-    if( reset || res ) // ReJ change: RESET forces D flag to 0, see page 10 of WDC 65C02 datasheet
+    if( reset )
+        D <= 0;
+    else if( res ) // ReJ change: RESET forces D flag to 0, see page 10 of WDC 65C02 datasheet
         D <= 0;        // https://www.westerndesigncenter.com/wdc/documentation/w65c02s.pdf
     else if( phi ) begin
         if( state == RTI2 )
@@ -1237,9 +1239,13 @@ always @(posedge clk, posedge reset) // AlexTheCat123: Added async reset for Lis
         NMI_1 <= NMI;
 
 always @(posedge clk, posedge reset) // AlexTheCat123: Added async reset for LisaFPGA
-    if( reset || (phi && NMI_edge && state == BRK3) )
+    if( reset )
         NMI_edge <= 0;
-    else if( phi && NMI && ~NMI_1 )
-        NMI_edge <= 1;
+    else if( phi ) begin
+        if( NMI_edge && state == BRK3 )
+            NMI_edge <= 0;
+        else if( NMI && ~NMI_1 )
+            NMI_edge <= 1;
+    end
 
 endmodule
