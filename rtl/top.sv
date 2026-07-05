@@ -1,0 +1,1216 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: N/A
+// Engineer: AlexTheCat123
+// 
+// Create Date: 08/29/2025 11:38:35 PM
+// Design Name: The Apple Lisa - All Inside an FPGA!!!
+// Module Name: top
+// Project Name: LisaFPGA
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 1.2 - Fixed SRAM issues for boards with marginal SRAM ICs and started clocking the VIAs off DOTCK instead of E for better timing stability.
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module top(
+        input logic sysclk,
+
+        output logic _VSYNC,
+        output logic _HSYNC,
+        output logic VID,
+        output logic [5:0] CONT,
+        input logic INVID,
+        input logic SCANLINES,
+        input logic FRAMERATE_SEL,
+
+        output logic TONE,
+        output logic [2:0] VC,
+
+        output logic HDMI_CLK_N,
+        output logic HDMI_CLK_P,
+        output logic [2:0] HDMI_D_N,
+        output logic [2:0] HDMI_D_P,
+
+        output logic _CE_SRAM,
+        output logic _OE_SRAM,
+        output logic _WE_SRAM,
+        output logic _UDS_SRAM,
+        output logic _LDS_SRAM,
+        output logic [20:1] A_SRAM,
+        inout logic [15:0] D_SRAM,
+
+        input logic [1:0] RAM_SEL,
+
+        inout logic [5:0] ESFLOPPY_COMM_BUS,
+        input logic RDA_ESFLOPPY,
+        output logic WRD_ESFLOPPY,
+        input logic SNS_ESFLOPPY,
+        output logic _WRQ_ESFLOPPY,
+        output logic HDS_ESFLOPPY,
+        output logic [3:0] PH_ESFLOPPY,
+        output logic MT1_ESFLOPPY,
+        output logic MT0_ESFLOPPY,
+        output logic _DR1_ESFLOPPY,
+        output logic _DR0_ESFLOPPY,
+        output logic PWM_ESFLOPPY,
+
+        input logic LEFT_ESFLOPPY,
+        input logic OK_ESFLOPPY,
+        input logic RIGHT_ESFLOPPY,
+
+        input logic RDA_EXTFLOPPY,
+        output logic WRD_EXTFLOPPY,
+        input logic SNS_EXTFLOPPY,
+        output logic _WRQ_EXTFLOPPY,
+        output logic HDS_EXTFLOPPY,
+        output logic [3:0] PH_EXTFLOPPY,
+        output logic MT1_EXTFLOPPY,
+        output logic MT0_EXTFLOPPY,
+        output logic _DR1_EXTFLOPPY,
+        output logic _DR0_EXTFLOPPY,
+        output logic PWM_EXTFLOPPY,
+
+        input logic FLOPPY_SRC,
+
+        inout logic [2:0] ESPROFILE_COMM_BUS,
+        output logic _CMD_ESPROFILE,
+        input logic _BSY_ESPROFILE,
+        output logic R_W_ESPROFILE,
+        output logic _STRB_ESPROFILE,
+        inout logic _PRES_ESPROFILE,
+        input logic _PARITY_ESPROFILE,
+        input logic OCD_ESPROFILE,
+        inout logic [7:0] PD_ESPROFILE,
+
+        output logic _CMD_EXTPROFILE,
+        input logic _BSY_EXTPROFILE,
+        output logic R_W_EXTPROFILE,
+        output logic _STRB_EXTPROFILE,
+        inout logic _PRES_EXTPROFILE,
+        input logic _PARITY_EXTPROFILE,
+        input logic OCD_EXTPROFILE,
+        inout logic [7:0] PD_EXTPROFILE,
+
+        input logic HDD_SRC,
+
+        inout logic KBD_DN,
+        inout logic KBD_DP,
+
+        inout logic KBD,
+
+        input logic KBD_SEL,
+
+        inout logic MOUSE_DN,
+        inout logic MOUSE_DP,
+
+        input logic [6:0] M_LISA,
+
+        input logic MOUSE_SEL,
+
+        (* PULLTYPE = "PULLDOWN" *) input logic [5:0] GPIO,
+
+        input logic SYNCA,
+        output logic TXDA,
+        output logic RTSA,
+        output logic DTRA,
+        input logic RXDA,
+        input logic CTSA,
+        input logic DCDA,
+        output logic TRXCA,
+        input logic RTXCA,
+        output logic TXDB,
+        output logic DTRB,
+        output logic RTSB,
+        input logic RXDB,
+        input logic CTSB_TRXCB,
+
+        output logic INTERNAL_SCC_EN,
+
+        input logic _PWRSW,
+        output logic ON,
+        input logic _RSTSW,
+        output logic _RESET,
+        input logic _NMISW,
+
+        input logic [1:0] SPEED_SEL,
+        input logic CPU_ROM_SEL,
+        input logic IO_ROM_SEL
+    );
+
+    // This is the board ID for the LisaFPGA identity register; software can read it to see if it's on a real Lisa or an FPGA
+    // The identity register is just a byte-extended version of the system status register
+    localparam logic [2:0] LisaFPGA_ID = 3'b110;
+    // This flag says whether this is a LisaFPGA Desktop board (as opposed to a Motherboard Replacement)
+    // It's also exposed as a field in the identity register
+    localparam logic LisaFPGA_Desktop = 1'b1;
+
+    // The internal Verilog SCC is now working, so enable the transceivers that hook it to the serial bus instead of using the external SCC
+    assign INTERNAL_SCC_EN = 1'b0;
+
+    // Pass the LEFT, OK, and RIGHT signals from the ESFloppy control buttons straight back out to the ESP32 again
+    // Just pick three of the ESFLOPPY_COMM_BUS lines for this
+    assign ESFLOPPY_COMM_BUS[0] = LEFT_ESFLOPPY;
+    assign ESFLOPPY_COMM_BUS[1] = OK_ESFLOPPY;
+    assign ESFLOPPY_COMM_BUS[2] = RIGHT_ESFLOPPY;
+    // Set the rest of the comm bus to a defined state
+    assign ESFLOPPY_COMM_BUS[5:3] = 3'b000;
+
+    logic _SL0;
+    logic _SH0;
+    logic _SL1;
+    logic _SH1;
+    logic _SL2;
+    logic _SH2;
+    tri1 _INT0;
+    tri1 _IAK0;
+    tri1 _INT1;
+    tri1 _IAK1; 
+    tri1 _INT2; 
+    tri1 _IAK2; 
+    tri1 _RSIR; 
+    tri1 _KBIR; 
+    logic _IOIR; // Original is open-collector, we're making it a regular logic signal instead, so unidirectional now (out of I/O, into CPU)
+    logic E;
+    logic CPUCK;
+    tri1 _LDMA; 
+    tri1 _BGACK; 
+    tri1 _BR; 
+    logic _BG;
+    logic [15:0] BD;
+    logic [15:0] BD_CPU;
+    logic BD_OE_CPU;
+    logic [15:0] BD_IO;
+    logic BD_OE_IO;
+    logic [12:1] A;
+    logic _VMA;
+    logic _VPA; // Original is open-collector, we're making it a regular logic signal instead that gets muxed here in the top module
+    logic _VPA_CPU; // It gets muxed from these
+    logic VPA_OE_CPU;
+    logic _VPA_IO;
+    logic VPA_OE_IO;
+    logic _DTACK; // Original is open-collector, we're making it a regular logic signal instead that gets muxed here in the top module
+    logic _DTACK_CPU; // It gets muxed from these
+    logic DTACK_OE_CPU;
+    logic _DTACK_IO;
+    logic DTACK_OE_IO;
+    tri1 _AS;
+    tri1 READ;
+    tri1 _LDS;
+    tri1 _UDS;
+    logic _CSYNC;
+    logic _INTIO;
+    logic VA10B;
+    logic VA9B;
+    logic _R1;
+    logic _R2;
+    tri [15:0] MD;
+    logic [15:0] MD_IN;
+    logic [15:0] MD_OUT;
+    logic [8:1] RA;
+    logic A16;
+    logic A17;
+    logic A18;
+    logic A19;
+    logic MREAD;
+    logic _CAS;
+    logic _RAS;
+    logic A20;
+    logic _HDER; // Original is open-collector, we're making it a regular logic signal instead that gets muxed here in the top module
+    logic _HDER_CPU; // It gets muxed from these
+    logic HDER_OE_CPU;
+    logic _HDER_MEM;
+    logic HDER_OE_MEM;
+    logic _SFER; // Original is open-collector, we're making it a regular logic signal instead that gets muxed here in the top module
+    logic _SFER_CPU; // It gets muxed from these
+    logic SFER_OE_CPU;
+    logic _SFER_MEM;
+    logic SFER_OE_MEM;
+    logic VID_int;
+    logic _NMI;
+    logic VAL_LED;
+    logic E_pos_phase;
+    logic E_neg_phase;
+
+    logic T1, T2, T3;
+
+    assign _BGACK = 1'b1;
+    assign _LDMA = 1'b1;
+    assign _BR = 1'b1;
+    assign _INT0 = 1'b1;
+    assign _INT1 = 1'b1;
+    assign _INT2 = 1'b1;
+
+    logic DOTCK;
+    logic sysclk_ibuf;
+
+    assign sysclk_ibuf = sysclk;
+
+    logic COPCK;
+    logic SCCCK_ungated;
+    logic SCCCK;
+
+    // We need to generate the 20.37504MHz DOTCK from the 125MHz sysclk
+    // And the 3.9MHz COPCK, 3.68MHz SCCCK, and 16MHz C16M too
+    logic C16M_ungated;
+    logic C16M;
+    logic COPCK_2x;
+    logic SCCCK_2x;
+    logic C5M_ungated;
+    logic C5M;
+    // This is the main Lisa dot clock before we gate it with the power switch; it can be anywhere from 20MHz to 75MHz
+    logic DOTCK_ungated;
+    // And here's a 12MHz clock for USB
+    logic usbclk;
+
+    // We use an MMCM for this, but there's a catch
+    // It can't generate either COPCK or SCCCK directly because the frequencies are too low
+    // So instead, we generate 2x the frequency of each and divide it by 2 with flip-flops
+    // We'll use this MMCM to generate everything but the DOTCK
+    clock_divider primary_clock_divider (
+        .sysclk(sysclk_ibuf),
+        //.lisa_dotck(lisa_dotck_ungated), // dotck_20M
+        .C16M(C16M_ungated),
+        .COPCK_2x(COPCK_2x),
+        .SCCCK_2x(SCCCK_2x),
+        .C5M(C5M_ungated),
+        .usbclk(usbclk)
+    );
+
+    // The DOTCK is a little bit different because we need to be able to select between multiple frequencies for it
+    // So we generate all of the possible DOTCK frequencies with a separate MMCM, and then use clock muxing to pick which one we want
+    logic dotck_20M;
+    logic dotck_40M;
+    logic dotck_60M;
+    logic dotck_80M;
+
+    // This second MMCM generates all of the dotck frequencies we can select from
+    dotck_mmcm dotck_generator (
+        .sysclk(sysclk_ibuf),
+        .dotck_20M(dotck_20M),
+        .dotck_40M(dotck_40M),
+        .dotck_60M(dotck_60M),
+        .dotck_80M(dotck_80M)
+    );
+
+    // Now we need to read the speed select inputs and pick which dot clock to use
+    // We have to use special BUFGMUX primitives that are designed for clock muxing; clocks can't be safely routed through regular muxes
+    // Each BUFGMUX can only select between two clocks, so we have to do it in multiple stages
+    // One for 20 or 40M, one for 60 or 80M, and one for selecting between the two groups
+
+    logic dotck_A, dotck_B;
+
+    // SPEED_SEL is in an unknown clock domain, so let's bring it into the dotck_20M domain before feeding it into the muxes
+    // This should help to get rid of any noise from flipping the switches too
+    logic [1:0] SPEED_SEL_dotck;
+    always_ff @(posedge dotck_20M) begin
+        SPEED_SEL_dotck <= SPEED_SEL;
+    end
+
+    // Behavioral clock multiplexing
+    assign dotck_A = SPEED_SEL_dotck[0] ? dotck_20M : dotck_40M;
+    assign dotck_B = SPEED_SEL_dotck[0] ? dotck_60M : dotck_80M;
+    assign DOTCK_ungated = SPEED_SEL_dotck[1] ? dotck_A : dotck_B;
+
+    // Here's that division by 2
+    always_ff @(posedge COPCK_2x) begin
+        // In simulation, we need to give COPCK a defined state on reset
+        `ifdef SIMULATION
+            if (!_RSTSW) begin
+                COPCK <= 1'b0;
+            end else begin
+                COPCK <= ~COPCK;
+            end
+        // But in real life, we don't want to do this; the COP should run at all times when powered on
+        // And we just use whatever random state it happens to be in on power-up
+        `else
+            COPCK <= ~COPCK;
+        `endif
+    end
+
+    // We need to do something similar for the SCCCK, but we also need to synchronize the reset signal into its clock domain before feeding it in
+    (* ASYNC_REG = "TRUE" *) logic _RESET_SCCCK_int, _RESET_SCCCK_sync;
+    always_ff @(posedge SCCCK_2x) begin
+        _RESET_SCCCK_int <= _RESET;
+        _RESET_SCCCK_sync <= _RESET_SCCCK_int;
+    end
+    // And now do the actual division by 2, using the synchronized reset signal
+    always_ff @(posedge SCCCK_2x, negedge _RESET_SCCCK_sync) begin
+        if (!_RESET_SCCCK_sync) begin
+            SCCCK_ungated <= 1'b0;
+        end else begin
+            SCCCK_ungated <= ~SCCCK_ungated;
+        end
+    end
+
+    `ifdef SIMULATION
+        // In simulation, we want the Lisa to always be on, so we don't gate the clocks
+        assign DOTCK = DOTCK_ungated;
+        assign C16M = C16M_ungated;
+        assign SCCCK = SCCCK_ungated;
+        assign C5M = C5M_ungated;
+    `else
+        // In real life, we gate the clocks based on the ON signal
+        // Use BUFGCE primitives for this; clocks shouldn't be routed through regular muxes
+        // We also need to synchronize the ON signal to each clock domain before feeding it into each BUFGCE
+        (* ASYNC_REG = "TRUE" *) logic ON_int_dotck, ON_int_c16m, ON_int_sccck, ON_int_c5m;
+        (* ASYNC_REG = "TRUE" *) logic ON_sync_dotck, ON_sync_c16m, ON_sync_sccck, ON_sync_c5m;
+        always_ff @(posedge DOTCK_ungated) begin
+            ON_int_dotck <= ON;
+            ON_sync_dotck <= ON_int_dotck;
+        end
+        always_ff @(posedge C16M_ungated) begin
+            ON_int_c16m <= ON;
+            ON_sync_c16m <= ON_int_c16m;
+        end
+        always_ff @(posedge SCCCK_ungated) begin
+            ON_int_sccck <= ON;
+            ON_sync_sccck <= ON_int_sccck;
+        end
+        always_ff @(posedge C5M_ungated) begin
+            ON_int_c5m <= ON;
+            ON_sync_c5m <= ON_int_c5m;
+        end
+        assign DOTCK = DOTCK_ungated & ON_sync_dotck;
+        assign C16M = C16M_ungated & ON_sync_c16m;
+        assign SCCCK = SCCCK_ungated & ON_sync_sccck;
+        assign C5M = C5M_ungated & ON_sync_c5m;
+        // This was the old and dumb way of doing things; it's a good thing I stopped doing it like this
+        //assign lisa_dotck = (ON) ? lisa_dotck_ungated : 1'b0;
+        //assign C16M = (ON) ? C16M_ungated : 1'b0;
+        //assign SCCCK = (ON) ? SCCCK_ungated : 1'b0;
+        //assign C5M = (ON) ? C5M_ungated : 1'b0;
+    `endif
+
+    logic _RSTSW_int;
+
+    // We need to be able to reset when the COP turns the Lisa on too, not just when the reset button is pressed
+    // Otherwise, many things will work, but some will be in bad states at power-on
+    // Like the 6504 for instance, which will pick up executing code wherever it left off when the Lisa was last powered down
+    logic ON_prev;
+    logic ON_rising;
+
+    always_ff @(posedge COPCK_2x) begin
+        ON_prev <= ON;
+        _RSTSW_int <= _RSTSW & ~(ON & ~ON_prev); // Detect the rising edge of ON and use that plus the reset switch to reset the system
+    end
+
+    // We also need to do some stuff with the _PWRSW signal to address a bug in the original Lisa system
+    // On the original Lisa, if you held the power button down for too long when trying to turn on, you'd get an Error 52
+    // So the simple fix here is to detect the falling edge of _PWRSW and just assert the power signal for a brief period after that occurs
+    // As opposed to the entire time that _PWRSW is low
+
+    // First, synchronize the _PWRSW signal to the COPCK domain
+    (* ASYNC_REG = "TRUE" *) logic _PWRSW_int, _PWRSW_sync;
+    always_ff @(posedge COPCK_2x) begin
+        _PWRSW_int <= _PWRSW;
+        _PWRSW_sync <= _PWRSW_int;
+    end
+    // Now detect the falling edge of the synchronized version of _PWRSW
+    logic _PWRSW_sync_prev;
+    always_ff @(posedge COPCK_2x) begin
+        _PWRSW_sync_prev <= _PWRSW_sync;
+    end
+    // And now generate a pulse whenever we see a falling edge on _PWRSW_sync
+    logic _PWRSW_falling;
+    logic [15:0] _PWRSW_pulse_counter; // We want the pulse to last a little more than just 1 clock, so make a counter to allow this
+    always_ff @(posedge COPCK_2x) begin
+        if (_PWRSW_sync_prev && !_PWRSW_sync) begin
+            _PWRSW_falling <= 1'b0; // If we see a falling edge, start the pulse
+            _PWRSW_pulse_counter <= 16'h0; // Reset the counter at the start of the pulse just in case it's not already reset
+        end else if (!_PWRSW_falling) begin
+            // We end up here if we're in the middle of a pulse
+            if (_PWRSW_pulse_counter == 16'hFFFF) begin
+                _PWRSW_falling <= 1'b1; // If a (rather arbitrary) FFFF clock cycles have passed, end the pulse
+            end else begin
+                _PWRSW_pulse_counter <= _PWRSW_pulse_counter + 1; // Otherwise, increment the counter and keep going
+            end
+        end else begin
+            _PWRSW_pulse_counter <= 16'h0; //If we're not in a pulse, make sure the counter is reset
+            _PWRSW_falling <= 1'b1; // And make sure the falling signal is deasserted
+        end
+    end
+
+    // We need a version of _RSTSW_int synchronized into the DOTCK domain for the CPU board, so do that now
+    (* ASYNC_REG = "TRUE" *) logic _RSTSW_dotck_int, _RSTSW_dotck;
+    always_ff @(posedge DOTCK_ungated) begin
+        _RSTSW_dotck_int <= _RSTSW_int;
+        _RSTSW_dotck <= _RSTSW_dotck_int;
+    end
+
+    // Note the inversion of _VSYNC and VID here; the LS132 on the motherboard does this
+    logic _VSYNC_int;
+    assign _VSYNC = ~_VSYNC_int;
+    assign VID = ~VID_int;
+
+    logic tmds_clock;
+    logic [2:0] tmds;
+
+    logic VA_overflow;
+    logic _clr_vid_clk;
+
+    HDMI_Interface lisa_hdmi_output(
+        .sysclk(sysclk_ibuf),
+        ._reset(_RESET),
+        .DOTCK(DOTCK),
+        .framerate_sel(FRAMERATE_SEL), // 0 for 1080p30, 1 for 1080p60
+        .VA_overflow(VA_overflow), // Replaces VSYNC; better reflects the VSYNC time which is actually longer than _VSYNC
+        ._clr_vid_clk(_clr_vid_clk), // Replaces _HSYNC; better reflects the HSYNC time which is actually shorter than _HSYNC
+        .VID(VID_int),
+        .CONT(CONT),
+        .TONE(TONE),
+        .VC(VC),
+        .CPU_ROM_SEL(CPU_ROM_SEL),
+        .blank_video(~ON), // When the Lisa is off, we want to blank the video output
+        .scanlines(SCANLINES), // When high, put scanlines on the video output to make it look cool
+        .tmds_clock(tmds_clock),
+        .tmds(tmds)
+    );
+
+    assign HDMI_D_P = 3'b0;
+    assign HDMI_D_N = 3'b0;
+    assign HDMI_CLK_P = 1'b0;
+    assign HDMI_CLK_N = 1'b0;
+
+    CPU_board cpu_board(
+        ._SL0(_SL0),
+        ._SH0(_SH0),
+        ._SL1(_SL1),
+        ._SH1(_SH1),
+        ._SL2(_SL2),
+        ._SH2(_SH2),
+        ._INT0(_INT0),
+        ._IAK0(_IAK0),
+        ._INT1(_INT1),
+        ._IAK1(_IAK1),
+        ._INT2(_INT2),
+        ._IAK2(_IAK2),
+        ._RSIR(_RSIR),
+        ._KBIR(_KBIR),
+        ._IOIR(_IOIR),
+        .E(E),
+        ._RESET(_RESET),
+        .CPUCK(CPUCK),
+        ._LDMA(_LDMA),
+        ._BGACK(_BGACK),
+        ._BR(_BR),
+        ._BG(_BG),
+        .BD_in(BD),
+        .BD_out(BD_CPU),
+        .BD_OE(BD_OE_CPU),
+        .A_OUT(A),
+        ._VMA(_VMA),
+        ._VPA_in(_VPA),
+        ._VPA_out(_VPA_CPU),
+        .VPA_OE(VPA_OE_CPU),
+        ._DTACK_in(_DTACK),
+        ._DTACK_out(_DTACK_CPU),
+        .DTACK_OE(DTACK_OE_CPU),
+        ._AS(_AS),
+        .READ(READ),
+        ._LDS(_LDS),
+        ._UDS(_UDS),
+        ._CSYNC(_CSYNC),
+        ._INTIO(_INTIO),
+        .VA10B(VA10B),
+        .VA9B(VA9B),
+        ._R1(_R1),
+        ._R2(_R2),
+        .MD_IN(MD_IN),
+        .MD_OUT(MD_OUT),
+        .RA(RA),
+        ._RSTSW(_RSTSW_dotck),
+        .A16(A16),
+        .A17(A17),
+        .A18(A18),
+        .A19(A19),
+        .DOTCK(DOTCK),
+        .MREAD(MREAD),
+        ._CAS(_CAS),
+        ._RAS(_RAS),
+        .A20(A20),
+        ._HSYNC(_HSYNC),
+        ._HDER_in(_HDER),
+        ._HDER_out(_HDER_CPU),
+        .HDER_OE(HDER_OE_CPU),
+        ._VSYNC(_VSYNC_int),
+        ._SFER_in(_SFER),
+        ._SFER_out(_SFER_CPU),
+        .SFER_OE(SFER_OE_CPU),
+        .VID(VID_int),
+        ._NMI(_NMI),
+
+        .VAL_LED(VAL_LED),
+        .INVID(~INVID),
+        .E_pos_phase(E_pos_phase),
+        .E_neg_phase(E_neg_phase),
+        .CPU_ROM_SEL(CPU_ROM_SEL),
+        .VA_overflow(VA_overflow),
+        ._clr_vid_clk(_clr_vid_clk),
+        .SPEED_SEL(SPEED_SEL),
+        .LisaFPGA_ID(LisaFPGA_ID),
+        .LisaFPGA_Desktop(LisaFPGA_Desktop)
+    );
+
+    logic [3:0] PH;
+    logic WRD;
+    logic _WRQ;
+    logic RDA;
+    logic _DR1;
+    logic _DR0;
+    logic HDS;
+    logic SNS;
+    logic MT1;
+    logic MT0;
+    logic _IRQ;
+    logic _BG0;
+    logic OCD;
+    logic [7:0] PD_in;
+    logic [7:0] PD_out;
+    logic _ProFile_EN;
+    logic PR_W_ungated;
+    logic _PARITY;
+    logic _PSTRB;
+    logic DR_W;
+    logic _BSY;
+    logic _CMD;
+    //logic SPKRIN;
+    logic KBD_in;
+    logic KBD_out;
+    logic [6:0] M;
+    logic _NMI_IO;
+    logic NMI_OE_IO;
+    logic _CRES_in;
+    logic _CRES_out;
+
+    // Here we mux VPA from the CPU board, I/O board, and expansion slots together
+    always_comb begin
+        // If the CPU board is trying to assert VPA, let it through
+        if (VPA_OE_CPU) begin
+            _VPA <= _VPA_CPU;
+        // Otherwise, if the I/O board is trying to assert VPA, let it through
+        end else if (VPA_OE_IO) begin
+            _VPA <= _VPA_IO;
+        // And otherwise, nothing is trying to drive it, so make sure it's deasserted
+        end else begin
+            _VPA <= 1'b1;
+        end
+        // Add more to this mux once we add the expansion slots!
+    end
+
+    // Same deal with the DTACK mux
+    always_comb begin
+        if (DTACK_OE_CPU) begin
+            _DTACK <= _DTACK_CPU;
+        end else if (DTACK_OE_IO) begin
+            _DTACK <= _DTACK_IO;
+        end else begin
+            _DTACK <= 1'b1;
+        end
+        // Add more to this mux once we add the expansion slots!
+    end
+
+    // And we need one for the buffered data bus (BD) too
+    always_comb begin
+        if (BD_OE_CPU) begin
+            BD <= BD_CPU;
+        end else if (BD_OE_IO) begin
+            BD <= BD_IO;
+        end else begin
+            BD <= 16'b0;
+        end
+        // Add more to this mux once we add the expansion slots!
+    end
+
+     // And another mux for NMI, which can be triggered by either the I/O board or the interrupt switch
+    always_comb begin
+        if (NMI_OE_IO) begin
+            _NMI = _NMI_IO;
+        end else if (!_NMISW) begin
+            _NMI = 1'b0;
+        end else begin
+            _NMI = 1'b1;
+        end
+    end
+
+    // And yet another for HDER, which can be triggered by either the CPU board or the memory board
+    always_comb begin
+        if (HDER_OE_CPU) begin
+            _HDER = _HDER_CPU;
+        end else if (HDER_OE_MEM) begin
+            _HDER = _HDER_MEM;
+        end else begin
+            _HDER = 1'b1;
+        end
+    end
+
+    // One more for SFER too, which is the same deal as HDER
+    always_comb begin
+        if (SFER_OE_CPU) begin
+            _SFER = _SFER_CPU;
+        end else if (SFER_OE_MEM) begin
+            _SFER = _SFER_MEM;
+        end else begin
+            _SFER = 1'b1;
+        end
+    end
+
+    assign _INT0 = 1'b1;
+    assign _INT1 = 1'b1;
+    assign _INT2 = 1'b1;
+
+    assign _IRQ = 1'b1;
+
+    // The floppy drive signals come from either the onboard ESFloppy or an external floppy drive
+    // This depends on the FLOPPY_SRC signal, so we need to mux between them
+
+    // First generate the Sony drive's PWM motor control signal
+    // It's derived from MT0, but processed through the Lite Adapter
+    // So let's make a Lite adapter to generate it
+    logic PWM;
+
+    Lite_Adapter lisa_lite (
+        .clk(C5M),
+        .rst(~_RSTSW_int),
+        .PH0(PH[0]),
+        .MT(MT1),
+        .PWM(PWM)
+    );
+
+    always_comb begin
+        // If FLOPPY_SRC is high, use the external floppy drive signals
+        if (FLOPPY_SRC) begin
+            if (IO_ROM_SEL) begin
+                // If we're in Twiggy mode, hook RDA and SNS up to their own individual pins
+                RDA = RDA_EXTFLOPPY;
+                SNS = SNS_EXTFLOPPY;
+            end else begin
+                // If we're in Sony mode, hook both RDA and SNS to RDA
+                RDA = RDA_EXTFLOPPY;
+                SNS = RDA_EXTFLOPPY;
+            end
+            WRD_EXTFLOPPY = WRD;
+            _WRQ_EXTFLOPPY = _WRQ;
+            HDS_EXTFLOPPY = HDS;
+            PH_EXTFLOPPY = PH;
+            MT1_EXTFLOPPY = MT1;
+            MT0_EXTFLOPPY = MT0;
+            _DR1_EXTFLOPPY = _DR1;
+            _DR0_EXTFLOPPY = _DR0;
+            PWM_EXTFLOPPY = PWM;
+            // And make sure that the onboard ESFloppy signals are inactive
+            WRD_ESFLOPPY = 1'b0;
+            _WRQ_ESFLOPPY = 1'b1;
+            HDS_ESFLOPPY = 1'b0;
+            PH_ESFLOPPY = 4'b0000;
+            MT1_ESFLOPPY = 1'b0;
+            MT0_ESFLOPPY = 1'b0;
+            _DR1_ESFLOPPY = 1'b1;
+            _DR0_ESFLOPPY = 1'b1;
+            PWM_ESFLOPPY = 1'b0;
+        // Otherwise, use the onboard ESFloppy signals
+        end else begin
+            if (IO_ROM_SEL) begin
+                // If we're in Twiggy mode, hook RDA and SNS up to their own individual pins
+                RDA = RDA_ESFLOPPY;
+                SNS = SNS_ESFLOPPY;
+            end else begin
+                // If we're in Sony mode, hook both RDA and SNS to RDA
+                RDA = RDA_ESFLOPPY;
+                SNS = RDA_ESFLOPPY;
+            end
+            WRD_ESFLOPPY = WRD;
+            _WRQ_ESFLOPPY = _WRQ;
+            HDS_ESFLOPPY = HDS;
+            PH_ESFLOPPY = PH;
+            MT1_ESFLOPPY = MT1;
+            MT0_ESFLOPPY = MT0;
+            _DR1_ESFLOPPY = _DR1;
+            _DR0_ESFLOPPY = _DR0;
+            PWM_ESFLOPPY = PWM;
+            // And make sure that the external floppy drive signals are inactive
+            WRD_EXTFLOPPY = 1'b0;
+            _WRQ_EXTFLOPPY = 1'b1;
+            HDS_EXTFLOPPY = 1'b0;
+            PH_EXTFLOPPY = 4'b0000;
+            MT1_EXTFLOPPY = 1'b0;
+            MT0_EXTFLOPPY = 1'b0;
+            _DR1_EXTFLOPPY = 1'b1;
+            _DR0_EXTFLOPPY = 1'b1;
+            PWM_EXTFLOPPY = 1'b0;
+        end
+    end
+
+    // The mouse can either be driven over USB or by a real Lisa/Mac mouse
+    logic [6:0] M_USB;
+
+    // Now it's time to do our USB peripherals
+    // Previously, the first USB port was for the mouse and the second for the keyboard
+    // But now they're flexible and you can plug either device into either port
+    // So we basically instantiate two USB HID host controllers, one for each port
+    // And then read their type codes to figure out which is which
+    // Then we route the mouse data from whichever port has the mouse, and the keyboard data from whichever port has the keyboard
+
+    // Before we do anything else related to USB though, we need to mess with our reset signal a bit
+    // The regular reset signal is generated in the DOTCK domain, but we need it in the usbclk domain
+    // So we'll create a synchronized version of it here
+    (* ASYNC_REG = "TRUE" *) logic usbrst_int, usbrst;
+    always_ff @(posedge usbclk) begin
+        usbrst_int <= _RESET;
+        usbrst <= usbrst_int;
+    end
+
+    // We also need IOBUFs for the USB data lines since they're bidirectional
+    // First for the USB D+ line
+    logic usb_dp_in_port0;
+    logic usb_dp_out_port0;
+    logic usb_dm_in_port0;
+    logic usb_dm_out_port0;
+    logic usb_oe_port0;
+    assign MOUSE_DP = usb_oe_port0 ? usb_dp_out_port0 : 1'bZ;
+    assign usb_dp_in_port0 = MOUSE_DP;
+
+    assign MOUSE_DN = usb_oe_port0 ? usb_dm_out_port0 : 1'bZ;
+    assign usb_dm_in_port0 = MOUSE_DN;
+
+    logic [1:0] usb_typ_port0;
+    logic usb_report_port0;
+    logic [7:0] usb_mouse_btn_port0;
+    logic signed [7:0] usb_mouse_dx_port0;
+    logic signed [7:0] usb_mouse_dy_port0;
+    logic [7:0] usb_key_modifiers_port0;
+    logic [7:0] usb_key1_port0;
+    // Instantiate the USB HID host module for the first USB port (port 0, previously hard-coded to be for the mouse)
+    `ifndef SIMULATION
+        usb_hid_host usb_port0 (
+            .usbclk(usbclk), // 12MHz clock
+            .usbrst_n(usbrst), // Active-low reset
+            .usb_dm(usb_dm_out_port0), // USB I/O
+            .usb_dp(usb_dp_out_port0),
+            .usb_dp_in(usb_dp_in_port0),
+            .usb_dm_in(usb_dm_in_port0),
+            .usb_oe(usb_oe_port0),
+            .typ(usb_typ_port0), // Type 2 = mouse, type 1 = keyboard
+            .report(usb_report_port0), // Pulses when we get a report from the device
+            .mouse_btn(usb_mouse_btn_port0), // Mouse button states
+            .mouse_dx(usb_mouse_dx_port0), // Mouse x and y movement
+            .mouse_dy(usb_mouse_dy_port0),
+            .key_modifiers(usb_key_modifiers_port0), // Keyboard key modifier bits
+            .key1(usb_key1_port0) // Up to 4 simultaneous keycodes
+        );
+    `endif
+
+    // Now repeat all that for the second USB port (port 1), previously hard-coded to be for the keyboard but now can be for anything
+    // We also need IOBUFs for the USB data lines since they're bidirectional
+    // First for the USB D+ line
+    logic usb_dp_in_port1;
+    logic usb_dp_out_port1;
+    logic usb_dm_in_port1;
+    logic usb_dm_out_port1;
+    logic usb_oe_port1;
+    assign KBD_DP = usb_oe_port1 ? usb_dp_out_port1 : 1'bZ;
+    assign usb_dp_in_port1 = KBD_DP;
+
+    assign KBD_DN = usb_oe_port1 ? usb_dm_out_port1 : 1'bZ;
+    assign usb_dm_in_port1 = KBD_DN;
+
+    logic [1:0] usb_typ_port1;
+    logic usb_report_port1;
+    logic [7:0] usb_mouse_btn_port1;
+    logic signed [7:0] usb_mouse_dx_port1;
+    logic signed [7:0] usb_mouse_dy_port1;
+    logic [7:0] usb_key_modifiers_port1;
+    logic [7:0] usb_key1_port1;
+    // Instantiate the USB HID host module for the second USB port (port 1, previously hard-coded to be for the keyboard)
+    `ifndef SIMULATION
+        usb_hid_host usb_port1 (
+            .usbclk(usbclk), // 12MHz clock
+            .usbrst_n(usbrst), // Active-low reset
+            .usb_dm(usb_dm_out_port1), // USB I/O
+            .usb_dp(usb_dp_out_port1),
+            .usb_dp_in(usb_dp_in_port1),
+            .usb_dm_in(usb_dm_in_port1),
+            .usb_oe(usb_oe_port1),
+            .typ(usb_typ_port1), // Type 2 = mouse, type 1 = keyboard
+            .report(usb_report_port1), // Pulses when we get a report from the device
+            .mouse_btn(usb_mouse_btn_port1), // Mouse button states
+            .mouse_dx(usb_mouse_dx_port1), // Mouse x and y movement
+            .mouse_dy(usb_mouse_dy_port1),
+            .key_modifiers(usb_key_modifiers_port1), // Keyboard key modifier bits
+            .key1(usb_key1_port1) // Up to 4 simultaneous keycodes
+        );
+    `endif
+
+    // Now we just need to look at the type codes from each port and route the data accordingly
+    logic signed [7:0] mouse_dx_selected;
+    logic signed [7:0] mouse_dy_selected;
+    logic [7:0] mouse_btn_selected;
+    logic mouse_report_selected;
+    logic [7:0] key_modifiers_selected;
+    logic [7:0] key1_selected;
+    logic key_report_selected;
+
+    always_comb begin
+        if (usb_typ_port0 == 2'd1) begin
+            // If the port0 type is 1, then it's a keyboard, so route it to the keyboard module
+            key_modifiers_selected = usb_key_modifiers_port0;
+            key1_selected = usb_key1_port0;
+            key_report_selected = usb_report_port0;
+        end else if (usb_typ_port1 == 2'd1) begin
+            // Otherwise, if port1 is a keyboard, then route that to the keyboard module
+            // Notice that if both ports are keyboards, port0 takes priority
+            key_modifiers_selected = usb_key_modifiers_port1;
+            key1_selected = usb_key1_port1;
+            key_report_selected = usb_report_port1;
+        end else begin
+            // If neither port is a keyboard, just send zeros to the keyboard module
+            key_modifiers_selected = 8'b0;
+            key1_selected = 8'b0;
+            key_report_selected = 1'b0;
+        end
+        if (usb_typ_port0 == 2'd2) begin
+            // If the port0 type is 2, then it's a mouse, so route it to the mouse module
+            mouse_dx_selected = usb_mouse_dx_port0;
+            mouse_dy_selected = usb_mouse_dy_port0;
+            mouse_btn_selected = usb_mouse_btn_port0;
+            mouse_report_selected = usb_report_port0;
+        end else if (usb_typ_port1 == 2'd2) begin
+            // Otherwise, if port1 is a mouse, then route that to the mouse module
+            // Once again, if both ports are the same peripheral, then port0 takes priority
+            mouse_dx_selected = usb_mouse_dx_port1;
+            mouse_dy_selected = usb_mouse_dy_port1;
+            mouse_btn_selected = usb_mouse_btn_port1;
+            mouse_report_selected = usb_report_port1;
+        end else begin
+            // If neither port is a mouse, just send zeros to the mouse module
+            mouse_dx_selected = 8'sb0;
+            mouse_dy_selected = 8'sb0;
+            mouse_btn_selected = 1'b0;
+            mouse_report_selected = 1'b0;
+        end
+    end
+
+    logic KBD_in_USB;
+    logic KBD_out_USB;
+    // Finally, instantiate the USB mouse interface module, routing in the appropriate signals
+    `ifndef SIMULATION
+        usb_mouse_interface usb_mouse_interface (
+            .usbclk(usbclk),
+            .usbrst(usbrst),
+            .mouse_dx_in(mouse_dx_selected),
+            .mouse_dy_in(mouse_dy_selected),
+            .mouse_btn_in(mouse_btn_selected),
+            .report(mouse_report_selected),
+            .M(M_USB)
+        );
+        // And now the USB keyboard one
+        usb_keyboard_interface usb_kbd_interface (
+            .usbclk(usbclk),
+            .usbrst(usbrst),
+            .key_modifiers_in(key_modifiers_selected),
+            .key1_in(key1_selected),
+            .report(key_report_selected),
+            .KBD_in(KBD_out_USB),
+            .KBD_out(KBD_in_USB)
+        );
+    `endif
+
+    // There's a little more we need to do for the keyboard though; it's bidirectional, so we need to make an IOBUF for the Lisa keyboard interface
+    logic KBD_in_LISA;
+    logic KBD_out_LISA;
+    assign KBD = ~KBD_out_LISA ? 1'b0 : 1'bZ;
+    assign KBD_in_LISA = KBD;
+
+    // And we have to mux between the USB and Lisa keyboard interfaces, depending on the KBD_SEL signal
+    always_comb begin
+        // If it's high, then use the USB keyboard
+        if (KBD_SEL) begin
+            KBD_in = KBD_in_USB;
+            KBD_out_USB = KBD_out;
+            KBD_out_LISA = 1'b1; // Make sure the Lisa keyboard interface is inactive
+        // And if it's low, use the Lisa keyboard interface
+        end else begin
+            KBD_in = KBD_in_LISA;
+            KBD_out_LISA = KBD_out;
+            KBD_out_USB = 1'b1; // Make sure the USB keyboard interface is inactive
+        end
+    end
+
+    // The Lisa mouse interface is literally just the M_LISA line from the port declaration
+    // So now mux between them based on the MOUSE_SEL signal
+    always_comb begin
+        // If MOUSE_SEL is high, use the USB mouse
+        if (MOUSE_SEL) begin
+            M = M_USB;
+        // Otherwise, use the Lisa mouse interface
+        end else begin
+            M = M_LISA;
+        end
+    end
+
+    // In real life, the ProFile can either be a real ProFile, or an onboard ESProFile emulator
+    // We'll need to mux between them, but first let's worry about the ProFile's bidirectional data bus
+    logic [7:0] PD_in_ESProFile;
+    logic [7:0] PD_out_ESProFile;
+    logic _ProFile_EN_ESProFile;
+    logic PR_W_ungated_ESProFile;
+    // All the ProFile data bus signals are bidirectional, so we use behavioral tri-state assignments
+    generate
+        for (i = 0; i < 8; i++) begin: pd_esprofile_gen
+            assign PD_ESPROFILE[i] = (~_ProFile_EN_ESProFile && ~PR_W_ungated_ESProFile) ? PD_out_ESProFile[i] : 1'bZ;
+            assign PD_in_ESProFile[i] = PD_ESPROFILE[i];
+        end
+    endgenerate
+
+    // CRES/PRES reset line is open-collector (pull low or high-Z)
+    assign _PRES_ESPROFILE = ~_CRES_out_ESProFile ? 1'b0 : 1'bZ;
+    assign _CRES_in_ESProFile = _PRES_ESPROFILE;
+
+    // Now do the same thing for the external "real" ProFile
+    generate
+        for (i = 0; i < 8; i++) begin: pd_extprofile_gen
+            assign PD_EXTPROFILE[i] = (~_ProFile_EN_ExtProFile && ~PR_W_ungated_ExtProFile) ? PD_out_ExtProFile[i] : 1'bZ;
+            assign PD_in_ExtProFile[i] = PD_EXTPROFILE[i];
+        end
+    endgenerate
+
+    assign _PRES_EXTPROFILE = ~_CRES_out_ExtProFile ? 1'b0 : 1'bZ;
+    assign _CRES_in_ExtProFile = _PRES_EXTPROFILE;
+    // For now, just hard-code something to the "ESProFile comm bus"
+    assign ESPROFILE_COMM_BUS = 3'b101;
+    // And now we just have to mux all that, along with some unidirectional control signals
+    // This depends on the state of the HDD_SRC switch
+    always_comb begin
+        // If HDD_SRC is low, use the ESProFile
+        if (!HDD_SRC) begin
+            PD_in = PD_in_ESProFile;
+            PD_out_ESProFile = PD_out;
+            _ProFile_EN_ESProFile = _ProFile_EN;
+            PR_W_ungated_ESProFile = PR_W_ungated;
+            _CRES_in = _CRES_in_ESProFile;
+            _CRES_out_ESProFile = _CRES_out;
+            _CMD_ESPROFILE = _CMD;
+            _BSY = _BSY_ESPROFILE;
+            R_W_ESPROFILE = DR_W;
+            _STRB_ESPROFILE = _PSTRB;
+            _PARITY = _PARITY_ESPROFILE;
+            OCD = OCD_ESPROFILE;
+            // But make sure that the external ProFile is left in a safe state (all outputs deasserted)
+            PD_out_ExtProFile = 8'b00000000;
+            _ProFile_EN_ExtProFile = 1'b1;
+            PR_W_ungated_ExtProFile = 1'b1;
+            _CRES_out_ExtProFile = 1'b1;
+            _CMD_EXTPROFILE = 1'b1;
+            R_W_EXTPROFILE = 1'b1;
+            _STRB_EXTPROFILE = 1'b1;
+        // Otherwise, use the external "real" ProFile
+        end else begin
+            PD_in = PD_in_ExtProFile;
+            PD_out_ExtProFile = PD_out;
+            _ProFile_EN_ExtProFile = _ProFile_EN;
+            PR_W_ungated_ExtProFile = PR_W_ungated;
+            _CRES_in = _CRES_in_ExtProFile;
+            _CRES_out_ExtProFile = _CRES_out;
+            _CMD_EXTPROFILE = _CMD;
+            _BSY = _BSY_EXTPROFILE;
+            R_W_EXTPROFILE = DR_W;
+            _STRB_EXTPROFILE = _PSTRB;
+            _PARITY = _PARITY_EXTPROFILE;
+            OCD = OCD_EXTPROFILE;
+            // And make sure that ESProFile is left in a safe state
+            PD_out_ESProFile = 8'b00000000;
+            _ProFile_EN_ESProFile = 1'b1;
+            PR_W_ungated_ESProFile = 1'b1;
+            _CRES_out_ESProFile = 1'b1;
+            _CMD_ESPROFILE = 1'b1;
+            R_W_ESPROFILE = 1'b1;
+            _STRB_ESPROFILE = 1'b1;
+        end
+    end
+
+    IO_board io_board(
+        .PH(PH),
+        .WRD(WRD),
+        ._WRQ(_WRQ),
+        .RDA(RDA),
+        ._DR1(_DR1),
+        ._DR0(_DR0),
+        .HDS(HDS),
+        .SNS(SNS),
+        .MT1(MT1),
+        .MT0(MT0),
+        ._IRQ(_IRQ),
+        ._RSIR(_RSIR),
+        ._KBIR(_KBIR),
+        ._IOIR(_IOIR),
+        .E(E),
+        ._RESET_SYSTEM(_RESET),
+        .CPUCK(CPUCK),
+        ._LDMA(_LDMA),
+        ._BGACK(_BGACK),
+        ._BR(_BR),
+        ._BG0(_BG0),
+        ._BG(_BG),
+        .BD_in(BD),
+        .BD_out(BD_IO),
+        .BD_OE(BD_OE_IO),
+        .A(A),
+        ._VMA(_VMA),
+        ._VPA_in(_VPA),
+        ._VPA_out(_VPA_IO),
+        .VPA_OE(VPA_OE_IO),
+        ._DTACK_in(_DTACK),
+        ._DTACK_out(_DTACK_IO),
+        .DTACK_OE(DTACK_OE_IO),
+        ._AS(_AS),
+        .READ(READ),
+        ._LDS(_LDS),
+        ._UDS(_UDS),
+        ._INTIO(_INTIO),
+        .OCD(OCD),
+        .PD_in(PD_in),
+        .PD_out(PD_out),
+        ._ProFile_EN(_ProFile_EN),
+        .PR_W_ungated(PR_W_ungated),
+        ._PARITY(_PARITY),
+        ._PSTRB(_PSTRB),
+        .DR_W(DR_W),
+        ._BSY(_BSY),
+        ._CMD(_CMD),
+        //.SPKRIN(SPKRIN),
+        .TONE(TONE),
+        .CONT(CONT),
+        .KBD_in(KBD_in),
+        .KBD_out(KBD_out),
+        .M(M),
+        .SYNCA(SYNCA),
+        .TXDA(TXDA),
+        .RTSA(RTSA),
+        .DTRA(DTRA),
+        .RXDA(RXDA),
+        .CTSA(CTSA),
+        .DCDA(DCDA),
+        .TRXCA(TRXCA),
+        .RTXCA(RTXCA),
+        .TXDB(TXDB),
+        .DTRB(DTRB),
+        .RTSB(RTSB),
+        .RXDB(RXDB),
+        .CTSB_TRXCB(CTSB_TRXCB),
+        ._CRES_in(_CRES_in),
+        ._CRES_out(_CRES_out),
+        ._NMI(_NMI_IO),
+        .NMI_OE(NMI_OE_IO),
+        ._PWRSW(_PWRSW_falling),
+        .ON(ON),
+
+        .sysclk(sysclk_ibuf),
+        .C16M(C16M),
+        .COPCK_2x(COPCK_2x),
+        .COPCK(COPCK),
+        .SCCCK(SCCCK),
+        .E_pos_phase(E_pos_phase),
+        .E_neg_phase(E_neg_phase),
+        .DOTCK(DOTCK),
+        .VC(VC),
+        .IO_ROM_SEL(IO_ROM_SEL),
+        .spoof_88(GPIO[0])
+    );
+
+    logic [15:0] DIN_SRAM;
+    logic [15:0] DOUT_SRAM;
+    logic SRAM_BUS_DIR;
+    generate
+        for (i = 0; i < 16; i++) begin: sram_d_gen
+            assign D_SRAM[i] = ~SRAM_BUS_DIR ? DOUT_SRAM[i] : 1'bZ;
+            assign DIN_SRAM[i] = D_SRAM[i];
+        end
+    endgenerate
+
+    `ifdef SIMULATION
+        // If we're simulating, just instantiate a single 512KB memory board; it's the only one that supports block RAM
+        mem_board_512k slot1(
+            .RA(RA),
+            .A17(A17),
+            .A18(A18),
+            .A19(A19),
+            .A20(A20),
+            .VA9(VA9B),
+            .VA10(VA10B),
+            .DOTCK(DOTCK),
+            ._UDS(_UDS),
+            ._LDS(_LDS),
+            ._CAS(_CAS),
+            ._RAS(_RAS),
+            .MREAD(MREAD),
+            .SLOT(1'b1),
+            ._RFSH(_R1),
+            .T1(T1),
+            .T2(T2),
+            .T3(T3),
+            .A16(A16),
+            .S1(1'b0),
+            .S2(1'b0),
+            .S3(1'b0),
+            .MD_IN(MD_OUT),
+            .MD_OUT(MD_IN),
+            ._HDER_in(_HDER),
+            ._HDER_out(_HDER_MEM),
+            .HDER_OE(HDER_OE_MEM),
+            ._SFER_in(_SFER),
+            ._SFER_out(_SFER_MEM),
+            .SFER_OE(SFER_OE_MEM),
+            ._CE_SRAM(_CE_SRAM),
+            ._OE_SRAM(_OE_SRAM),
+            ._WE_SRAM(_WE_SRAM),
+            ._UDS_SRAM(_UDS_SRAM),
+            ._LDS_SRAM(_LDS_SRAM),
+            .A_SRAM(A_SRAM),
+            .DIN_SRAM(DIN_SRAM),
+            .DOUT_SRAM(DOUT_SRAM),
+            .SRAM_BUS_DIR(SRAM_BUS_DIR)
+        );
+    `else
+        // Otherwise, instantiate a 2MB memory board; it uses the external SDRAM chip
+        mem_board_2mb slot1(
+            .RA(RA),
+            .A16(A16),
+            .A17(A17),
+            .A18(A18),
+            .A19(A19),
+            .A20(A20),
+            .RAM_SEL(RAM_SEL),
+            .DOTCK(DOTCK),
+            ._UDS(_UDS),
+            ._LDS(_LDS),
+            ._CAS(_CAS),
+            ._RAS(_RAS),
+            .MREAD(MREAD),
+            .MD_IN(MD_OUT),
+            .MD_OUT(MD_IN),
+            ._HDER_in(_HDER),
+            ._HDER_out(_HDER_MEM),
+            .HDER_OE(HDER_OE_MEM),
+            ._SFER_in(_SFER),
+            ._SFER_out(_SFER_MEM),
+            .SFER_OE(SFER_OE_MEM),
+            ._CE_SRAM(_CE_SRAM),
+            ._OE_SRAM(_OE_SRAM),
+            ._WE_SRAM(_WE_SRAM),
+            ._UDS_SRAM(_UDS_SRAM),
+            ._LDS_SRAM(_LDS_SRAM),
+            .A_SRAM(A_SRAM),
+            .DIN_SRAM(DIN_SRAM),
+            .DOUT_SRAM(DOUT_SRAM),
+            .SRAM_BUS_DIR(SRAM_BUS_DIR)
+        );
+    `endif
+
+endmodule
