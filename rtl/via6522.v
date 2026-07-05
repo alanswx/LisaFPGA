@@ -383,42 +383,42 @@ reg timer_a_may_interrupt;
 
 // Alex - Made reset asynchronous for LisaFPGA
 always @(posedge clock, posedge reset) begin
-   if(falling) begin
-      // always count, or load
-                        
-      if(timer_a_reload) begin
-         timer_a_count  <= timer_a_latch;
-         if(write_t1c_l)
-           timer_a_count[7:0] <= data_in;
-
-         timer_a_reload <= 1'b0;
-         timer_a_may_interrupt <= timer_a_may_interrupt & acr[6];
-      end else begin
-        if(timer_a_count == 16'h0000)
-          // generate an event if we were triggered
-          timer_a_reload <= 1'b1;
-         // Timer coutinues to count in both free run and one shot.                        
-         timer_a_count <= timer_a_count - 16'h0001;
-      end
-   end
-                
-   if(rising) begin
-      if(irq_events[6] && acr[7]) 
-        timer_a_toggle <= !timer_a_toggle;
-   end
-
-   if(write_t1c_h) begin
-      timer_a_may_interrupt <= 1'b1;
-      timer_a_toggle <= !acr[7];
-      timer_a_count  <= { data_in, timer_a_latch[7:0] };
-      timer_a_reload <= 1'b0;
-   end
-
-  if (reset) begin
+   if (reset) begin
       timer_a_may_interrupt <= 1'b0;
       timer_a_toggle <= 1'b1;
       timer_a_count  <= latch_reset_pattern;
       timer_a_reload <= 1'b0;
+   end else begin
+      if(falling) begin
+         // always count, or load
+                           
+         if(timer_a_reload) begin
+            timer_a_count  <= timer_a_latch;
+            if(write_t1c_l)
+              timer_a_count[7:0] <= data_in;
+
+            timer_a_reload <= 1'b0;
+            timer_a_may_interrupt <= timer_a_may_interrupt & acr[6];
+         end else begin
+           if(timer_a_count == 16'h0000)
+             // generate an event if we were triggered
+             timer_a_reload <= 1'b1;
+            // Timer coutinues to count in both free run and one shot.                        
+            timer_a_count <= timer_a_count - 16'h0001;
+         end
+      end
+                   
+      if(rising) begin
+         if(irq_events[6] && acr[7]) 
+           timer_a_toggle <= !timer_a_toggle;
+      end
+
+      if(write_t1c_h) begin
+         timer_a_may_interrupt <= 1'b1;
+         timer_a_toggle <= !acr[7];
+         timer_a_count  <= { data_in, timer_a_latch[7:0] };
+         timer_a_reload <= 1'b0;
+      end
    end
 end
 
@@ -569,26 +569,27 @@ assign irq_events[2] = shift_tick_r && !shift_active && rising && serport_en;
 
 // Alex - Made reset asynchronous for LisaFPGA
 always @(posedge clock, posedge reset) begin
-   if(falling) begin
-      if(!shift_active && acr[4:2] != 3'b000) begin
-         if(trigger_serial) begin
-            bit_cnt      <= 8'd7;
-            shift_active <= 1'b1;
-         end
-      end  else begin // we're active
-         if(acr[3:2] == 2'b00)
-           shift_active <= acr[4]; // when 1'b1 we're active, but for mode 000 we go inactive.
-         else if(shift_pulse && shift_clock) begin
-            if(bit_cnt == 8'd0)
-              shift_active <= 1'b0;
-            else
-              bit_cnt <= bit_cnt - 8'd1;
-         end
-      end                            
-   end
    if (reset) begin
-     shift_active <= 1'b0;
-     bit_cnt      <= 8'd0;
+      shift_active <= 1'b0;
+      bit_cnt      <= 8'd0;
+   end else begin
+      if(falling) begin
+         if(!shift_active && acr[4:2] != 3'b000) begin
+            if(trigger_serial) begin
+               bit_cnt      <= 8'd7;
+               shift_active <= 1'b1;
+            end
+         end  else begin // we're active
+            if(acr[3:2] == 2'b00)
+              shift_active <= acr[4]; // when 1'b1 we're active, but for mode 000 we go inactive.
+            else if(shift_pulse && shift_clock) begin
+               if(bit_cnt == 8'd0)
+                 shift_active <= 1'b0;
+               else
+                 bit_cnt <= bit_cnt - 8'd1;
+            end
+         end                            
+      end
    end
 end
 
