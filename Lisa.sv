@@ -9,7 +9,7 @@ module emu (
     input  wire  [1:0] RESET,
 
     // HPS Bus Interface (OSD, SD card, etc.)
-    inout  wire [45:0] HPS_BUS,
+    inout  wire [48:0] HPS_BUS,
 
     // Video Output (VGA / Analog)
     output wire        CLK_VIDEO,
@@ -157,13 +157,13 @@ module emu (
     wire [15:0] ioctl_data;
 
     // ProFile Hard Disk HPS signals
-    wire [31:0] sd_lba;
+    wire [31:0] sd_lba[1];
     wire        sd_rd;
     wire        sd_wr;
     wire        sd_ack;
     wire  [7:0] sd_buff_addr;
     wire [15:0] sd_buff_dout;
-    wire [15:0] sd_buff_din;
+    wire [15:0] sd_buff_din[1];
     wire        sd_buff_wr;
     wire        img_mounted;
     wire [63:0] img_size;
@@ -176,14 +176,14 @@ module emu (
         .buttons(buttons),
         .status(status),
 
-        .sd_lba({sd_lba}),
+        .sd_lba(sd_lba),
         .sd_rd(sd_rd),
         .sd_wr(sd_wr),
         .sd_ack(sd_ack),
 
         .sd_buff_addr(sd_buff_addr),
         .sd_buff_dout(sd_buff_dout),
-        .sd_buff_din({sd_buff_din}),
+        .sd_buff_din(sd_buff_din),
         .sd_buff_wr(sd_buff_wr),
 
         .img_mounted(img_mounted),
@@ -425,13 +425,13 @@ module emu (
         .PD(pd_esprofile),
 
         // HPS sector interface
-        .sd_lba(sd_lba),
+        .sd_lba(sd_lba[0]),
         .sd_rd(sd_rd),
         .sd_wr(sd_wr),
         .sd_ack(sd_ack),
         .sd_buff_addr(sd_buff_addr),
         .sd_buff_dout(sd_buff_dout),
-        .sd_buff_din(sd_buff_din),
+        .sd_buff_din(sd_buff_din[0]),
         .sd_buff_wr(sd_buff_wr)
     );
 
