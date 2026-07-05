@@ -80,6 +80,21 @@ module emu (
     input  wire        OSD_STATUS
 );
 
+    wire        ADC_BUS;
+    wire        DDRAM_CLK;
+    wire  [1:0] DDRAM_BURSTCNT;
+    wire [28:0] DDRAM_ADDR;
+    wire [63:0] DDRAM_DIN;
+    wire  [7:0] DDRAM_BE;
+    wire        DDRAM_RD;
+    wire        DDRAM_WE;
+
+    wire [11:0] HDMI_WIDTH = 12'd0;
+    wire [11:0] HDMI_HEIGHT = 12'd0;
+
+    wire  [5:0] CONT_core;
+    wire [15:0] D_SRAM;
+
     assign ADC_BUS  = 'Z;
     assign USER_OUT = '1;
 

@@ -957,10 +957,20 @@ module top(
 
     // In real life, the ProFile can either be a real ProFile, or an onboard ESProFile emulator
     // We'll need to mux between them, but first let's worry about the ProFile's bidirectional data bus
+    genvar i;
     logic [7:0] PD_in_ESProFile;
     logic [7:0] PD_out_ESProFile;
     logic _ProFile_EN_ESProFile;
     logic PR_W_ungated_ESProFile;
+    logic _CRES_out_ESProFile;
+    logic _CRES_in_ESProFile;
+
+    logic [7:0] PD_in_ExtProFile;
+    logic [7:0] PD_out_ExtProFile;
+    logic _ProFile_EN_ExtProFile;
+    logic PR_W_ungated_ExtProFile;
+    logic _CRES_out_ExtProFile;
+    logic _CRES_in_ExtProFile;
     // All the ProFile data bus signals are bidirectional, so we use behavioral tri-state assignments
     generate
         for (i = 0; i < 8; i++) begin: pd_esprofile_gen
