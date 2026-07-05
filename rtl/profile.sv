@@ -128,7 +128,7 @@ module profile (
     state_t state, return_state;
 
     // Spare table content (48 bytes + FF padding)
-    localparam [7:0] spareTable[48] = '{
+    localparam logic [7:0] spareTable[48] = '{
         8'h50, 8'h52, 8'h4F, 8'h46, 8'h49, 8'h4C, 8'h45, 8'h20, 8'h20, 8'h20, 8'h20, 8'h20, 8'h20, 8'h00, 8'h00, 8'h00,
         8'h03, 8'h98, 8'h00, 8'h26, 8'h00, 8'h02, 8'h14, 8'h20, 8'h00, 8'h00, 8'hFF, 8'hFF, 8'hFF, 8'hFF, 8'hFF, 8'hFF,
         8'h43, 8'h61, 8'h6D, 8'h65, 8'h6F, 8'h2F, 8'h41, 8'h70, 8'h68, 8'h69, 8'h64, 8'h20, 8'h30, 8'h30, 8'h30, 8'h31
