@@ -33,6 +33,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem_board_2mb.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem_board_512k.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/parity_generator_LS280.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/top.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/stubs.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/usb_mouse_interface.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/uaddrPla.sv
 set_global_assignment -name VERILOG_FILE rtl/via6522.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/z8530_scc.sv
