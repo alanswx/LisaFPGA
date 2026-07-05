@@ -73,24 +73,26 @@ module emu (
     output wire        UART_DTR,
     input  wire        UART_DSR,
 
-    // Open-drain User port (unused here)
     input  wire  [6:0] USER_IN,
     output wire  [6:0] USER_OUT,
 
-    input  wire        OSD_STATUS
+    input  wire        OSD_STATUS,
+
+    // MiSTer DDRAM, ADC, and HDMI video info ports
+    inout  wire  [3:0] ADC_BUS,
+    output wire        DDRAM_CLK,
+    output wire [28:0] DDRAM_ADDR,
+    output wire  [1:0] DDRAM_BURSTCNT,
+    input  wire        DDRAM_BUSY,
+    input  wire [63:0] DDRAM_DOUT,
+    input  wire        DDRAM_DOUT_READY,
+    output wire        DDRAM_RD,
+    output wire [63:0] DDRAM_DIN,
+    output wire  [7:0] DDRAM_BE,
+    output wire        DDRAM_WE,
+    input  wire [11:0] HDMI_WIDTH,
+    input  wire [11:0] HDMI_HEIGHT
 );
-
-    wire        ADC_BUS;
-    wire        DDRAM_CLK;
-    wire  [1:0] DDRAM_BURSTCNT;
-    wire [28:0] DDRAM_ADDR;
-    wire [63:0] DDRAM_DIN;
-    wire  [7:0] DDRAM_BE;
-    wire        DDRAM_RD;
-    wire        DDRAM_WE;
-
-    wire [11:0] HDMI_WIDTH = 12'd0;
-    wire [11:0] HDMI_HEIGHT = 12'd0;
 
     wire  [5:0] CONT_core;
     wire [15:0] D_SRAM;
@@ -98,7 +100,13 @@ module emu (
     assign ADC_BUS  = 'Z;
     assign USER_OUT = '1;
 
-    assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = 0;
+    assign DDRAM_CLK = 1'b0;
+    assign DDRAM_ADDR = 29'b0;
+    assign DDRAM_BURSTCNT = 2'b0;
+    assign DDRAM_RD = 1'b0;
+    assign DDRAM_DIN = 64'b0;
+    assign DDRAM_BE = 8'b0;
+    assign DDRAM_WE = 1'b0;
     assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
     assign LED_DISK  = 0;
