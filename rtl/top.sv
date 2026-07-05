@@ -142,7 +142,8 @@ module top(
 
         input logic [1:0] SPEED_SEL,
         input logic CPU_ROM_SEL,
-        input logic IO_ROM_SEL
+        input logic IO_ROM_SEL,
+        output logic usbclk
     );
 
     // This is the board ID for the LisaFPGA identity register; software can read it to see if it's on a real Lisa or an FPGA
@@ -268,7 +269,7 @@ module top(
     // This is the main Lisa dot clock before we gate it with the power switch; it can be anywhere from 20MHz to 75MHz
     logic DOTCK_ungated;
     // And here's a 12MHz clock for USB
-    logic usbclk;
+    // (usbclk is declared as an output port of module top)
 
     // We use an MMCM for this, but there's a catch
     // It can't generate either COPCK or SCCCK directly because the frequencies are too low

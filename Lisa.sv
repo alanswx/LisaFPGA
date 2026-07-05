@@ -557,10 +557,8 @@ module emu (
 
         .SPEED_SEL(status[6:5]),
         .CPU_ROM_SEL(status[7]),
-        .IO_ROM_SEL(status[8])
+        .IO_ROM_SEL(status[8]),
+        .usbclk(usbclk_12M)
     );
-
-    // Extract usbclk from clock_divider to feed mouse_adapter and kbd_adapter
-    assign usbclk_12M = core.usbclk;
 
 endmodule
