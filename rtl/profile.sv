@@ -54,17 +54,7 @@ module profile (
         {cache_data[{1'b1, sd_buff_addr, 1'b1}], cache_data[{1'b1, sd_buff_addr, 1'b0}]};
 
     // Buffer writes from HPS to Cache BRAM
-    always_ff @(posedge clk) begin
-        if (sd_buff_wr) begin
-            if (active_slot == 1'b0) begin
-                cache_data[{1'b0, sd_buff_addr, 1'b0}] <= sd_buff_dout[7:0];
-                cache_data[{1'b0, sd_buff_addr, 1'b1}] <= sd_buff_dout[15:8];
-            end else begin
-                cache_data[{1'b1, sd_buff_addr, 1'b0}] <= sd_buff_dout[7:0];
-                cache_data[{1'b1, sd_buff_addr, 1'b1}] <= sd_buff_dout[15:8];
-            end
-        end
-    end
+    // (Moved to the main always_ff block below to prevent multiple constant drivers)
 
     // Command decoding and buffering
     reg [7:0] commandBuffer[6];
@@ -157,6 +147,17 @@ module profile (
 
     // Emulator FSM and Cache Logic
     always_ff @(posedge clk) begin
+        // Buffer writes from HPS to Cache BRAM
+        if (sd_buff_wr) begin
+            if (active_slot == 1'b0) begin
+                cache_data[{1'b0, sd_buff_addr, 1'b0}] <= sd_buff_dout[7:0];
+                cache_data[{1'b0, sd_buff_addr, 1'b1}] <= sd_buff_dout[15:8];
+            end else begin
+                cache_data[{1'b1, sd_buff_addr, 1'b0}] <= sd_buff_dout[7:0];
+                cache_data[{1'b1, sd_buff_addr, 1'b1}] <= sd_buff_dout[15:8];
+            end
+        end
+
         if (reset || _PRES == 0) begin
             state <= ST_RESET;
             _BSY <= 1'b1;
