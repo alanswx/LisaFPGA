@@ -223,8 +223,8 @@ module usb_keyboard_interface(
 
     // An enum for the states of each modifier key
     typedef enum logic [1:0] {
-        DOWN = 0,
-        UP = 1
+        DOWN,
+        UP
     } modifier_state_t;
 
     // Now create some signals for storing the previous states of said keys: shift (left/right are same), left/right option, and apple key
