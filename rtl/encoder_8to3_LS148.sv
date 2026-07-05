@@ -41,7 +41,7 @@ module encoder_8to3_LS148(
         // Now implement the priority encoder; it's just a bunch of if's
         // Apparently SystemVerilog has this cool "priority if" construct to make sure the synthesizer infers the right thing
         // It would very likely work fine without it though
-        priority if (D[7]) begin
+        if (D[7]) begin
             Q_int = 3'd7;
         end else if (D[6]) begin
             Q_int = 3'd6;
