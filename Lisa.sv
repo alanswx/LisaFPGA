@@ -26,8 +26,8 @@ module emu (
     output wire        VGA_DISABLE,
 
     // Video Aspect Ratio / Scale controls
-    output wire [11:0] VIDEO_ARX,
-    output wire [11:0] VIDEO_ARY,
+    output wire [12:0] VIDEO_ARX,
+    output wire [12:0] VIDEO_ARY,
     output wire        HDMI_FREEZE,
     output wire        HDMI_BLACKOUT,
     output wire        HDMI_BOB_DEINT,
