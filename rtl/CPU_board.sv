@@ -597,6 +597,7 @@ module CPU_board(
     // This simulates the pull-up resistors on the original board
     // For some reason, setting MMU_RAM_out to tri1 doesn't work, so we have to do it that way instead
     MMU_RAM_2148 low_MMU_RAM(
+        .clk(DOTCK),
         .A_MMU({UA[19:17], UA[21], UA[22], UA[23], MS2, UA[20], B_L, MS1}),
         ._CS(1'b0),
         ._WE(_MMU_reg_WE),
@@ -604,6 +605,7 @@ module CPU_board(
         .D_out(MMU_RAM_out[3:0])
     );
     MMU_RAM_2148 mid_MMU_RAM(
+        .clk(DOTCK),
         .A_MMU({UA[19:17], UA[21], UA[22], UA[23], MS2, UA[20], B_L, MS1}),
         ._CS(1'b0),
         ._WE(_MMU_reg_WE),
@@ -611,6 +613,7 @@ module CPU_board(
         .D_out(MMU_RAM_out[7:4])
     );
     MMU_RAM_2148 high_MMU_RAM(
+        .clk(DOTCK),
         .A_MMU({UA[19:17], UA[21], UA[22], UA[23], MS2, UA[20], B_L, MS1}),
         ._CS(_MMU_highreg_CS),
         ._WE(_MMU_reg_WE),

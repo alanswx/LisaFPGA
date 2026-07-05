@@ -21,6 +21,7 @@
 
 
 module MMU_RAM_2148(
+    input logic clk,
     input logic [9:0] A_MMU,
     input logic _CS,
     input logic _WE,
@@ -37,7 +38,7 @@ module MMU_RAM_2148(
     // And a tri1 signal doesn't work here on the actual hardware for some reason
     assign D_out = (!_CS & _WE) ? RAM_array[A_MMU] : 4'b1111;
 
-    always @(_CS, _WE) begin // negedge _CS, negedge _WE
+    always_ff @(posedge clk) begin
         // If the chip is selected and it is a write, then read the 4 bits off the data bus and save them into the RAM array
         if (!_CS & !_WE) begin
             RAM_array[A_MMU] <= D_in;
