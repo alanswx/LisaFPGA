@@ -1,52 +1,109 @@
 // clock_divider.v
-// Emulation of Xilinx primary clock divider using Altera PLL and phase accumulators
+// Clock-ENABLE generator for the single-clock Lisa core.
+//
+// The whole core runs on one real clock, clk_sys (81.50016 MHz, straight off the
+// PLL and on a global clock network). Every "clock" the Lisa needs is provided
+// here as a one-clk_sys-cycle enable strobe that pulses at the moment the old
+// derived clock had a rising edge. Consumers use `@(posedge clk_sys) if (x_en)`
+// instead of `@(posedge x)`, which removes all the fabric-routed derived clocks
+// that could not meet hold timing / route.
+//
+// Exact (harmonic) rates use counters; the non-harmonic rates use a phase
+// accumulator whose CARRY-OUT is the strobe (average frequency correct to a few
+// ppm, one-cycle-wide pulse, glitch-free).
+//
+//   dotck_en    selectable: /4 (20.4MHz), /2 (40.75), 3-of-4 (~61.1), /1 (81.5)
+//   c16m_en     clk_sys / 5   -> 16.300032 MHz
+//   c5m_en      clk_sys / 16  ->  5.09376  MHz
+//   copck2x_en  ~3.90    MHz  (COPCK_2x)   phase accumulator
+//   sccck2x_en  ~7.3728  MHz  (SCCCK_2x)   phase accumulator
+//   usbclk_en   ~12.00   MHz  (usbclk)     phase accumulator
+//
+// See todo.md: the ~61.1MHz (60M turbo) DOTCK enable is an irregular 3-of-4
+// pattern; the 20/40/80 modes are exact.
 
 `timescale 1 ps / 1 ps
 
 module clock_divider (
-    input  wire  sysclk,     // 50 MHz input
-    output wire  C16M,       // 16.300032 MHz
-    output wire  COPCK_2x,   // 3.90 MHz
-    output wire  SCCCK_2x,   // 7.3728 MHz
-    output wire  C5M,        // 5.09376 MHz
-    output wire  usbclk      // 12.00 MHz
+    input  wire        clk_sys,     // 81.50016 MHz master clock
+    input  wire [1:0]  speed_sel,   // DOTCK speed select (async; synchronized here)
+    output wire        dotck_en,    // DOTCK rising-edge strobe (rate per speed_sel)
+    output wire        c16m_en,     // 16.300032 MHz strobe
+    output wire        c5m_en,      //  5.09376  MHz strobe
+    output wire        copck2x_en,  //  3.90     MHz strobe
+    output wire        sccck2x_en,  //  7.3728   MHz strobe
+    output wire        usbclk_en    // 12.00     MHz strobe
 );
 
-    wire locked;
-    wire c16m_internal;
-
-    altera_pll #(
-        .fractional_vco_multiplier("true"),
-        .reference_clock_frequency("50.0 MHz"),
-        .operation_mode("direct"),
-        .number_of_clocks(4),
-        .output_clock_frequency0("16.300032 MHz"),
-        .phase_shift0("0 ps"),
-        .duty_cycle0(50),
-        .output_clock_frequency1("7.3728 MHz"),
-        .phase_shift1("0 ps"),
-        .duty_cycle1(50),
-        .output_clock_frequency2("3.90 MHz"),
-        .phase_shift2("0 ps"),
-        .duty_cycle2(50),
-        .output_clock_frequency3("12.00 MHz"),
-        .phase_shift3("0 ps"),
-        .duty_cycle3(50)
-    ) pll_i (
-        .refclk(sysclk),
-        .rst(1'b0),
-        .outclk({usbclk, COPCK_2x, SCCCK_2x, c16m_internal}),
-        .locked(locked)
-    );
-
-    assign C16M = c16m_internal;
-
-    // Generate C5M (5.09376 MHz) by dividing C16M (16.300032 MHz) by 3.2
-    // using a phase accumulator. Increment = (5.09376 / 16.300032) * 2^32 = 1342177280
-    reg [31:0] c5m_acc;
-    always @(posedge c16m_internal) begin
-        c5m_acc <= c5m_acc + 32'd1342177280;
+    // --- Synchronize the (async) speed-select switches into clk_sys ---------
+    (* ASYNC_REG = "TRUE" *) reg [1:0] speed_sel_meta = 2'b11;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] speed_sel_sync = 2'b11;
+    always @(posedge clk_sys) begin
+        speed_sel_meta <= speed_sel;
+        speed_sel_sync <= speed_sel_meta;
     end
-    assign C5M = c5m_acc[31];
+
+    // --- DOTCK enable -------------------------------------------------------
+    // speed_sel mapping (matches the old behavioral clock mux in top.sv):
+    //   11 -> 20.4MHz  (/4)     10 -> 40.75MHz (/2)
+    //   01 -> 61.1MHz  (3-of-4) 00 -> 81.5MHz  (/1)
+    reg [1:0] dcnt = 2'b00;
+    always @(posedge clk_sys) begin
+        dcnt <= dcnt + 2'b01;
+    end
+    reg dotck_en_r;
+    always @(*) begin
+        case (speed_sel_sync)
+            2'b11:   dotck_en_r = (dcnt == 2'b00);   // /4  -> 20.4 MHz
+            2'b10:   dotck_en_r = (dcnt[0] == 1'b0); // /2  -> 40.75 MHz
+            2'b01:   dotck_en_r = (dcnt != 2'b11);   // 3/4 -> ~61.1 MHz (irregular; see todo.md)
+            default: dotck_en_r = 1'b1;              // /1  -> 81.5 MHz
+        endcase
+    end
+    assign dotck_en = dotck_en_r;
+
+    // --- C16M enable = clk_sys / 5 -----------------------------------------
+    reg [2:0] c16m_cnt = 3'd0;
+    always @(posedge clk_sys) begin
+        if (c16m_cnt == 3'd4)
+            c16m_cnt <= 3'd0;
+        else
+            c16m_cnt <= c16m_cnt + 3'd1;
+    end
+    assign c16m_en = (c16m_cnt == 3'd0);
+
+    // --- C5M enable = clk_sys / 16 -----------------------------------------
+    reg [3:0] c5m_cnt = 4'd0;
+    always @(posedge clk_sys) begin
+        c5m_cnt <= c5m_cnt + 4'd1;
+    end
+    assign c5m_en = (c5m_cnt == 4'd0);
+
+    // --- COPCK_2x enable ~3.90 MHz (phase accumulator, carry-out strobe) ----
+    // inc = round((3.90 / 81.50016) * 2^32) = 205530663
+    reg [31:0] copck_acc = 32'd0;
+    wire [32:0] copck_sum = {1'b0, copck_acc} + 33'd205530663;
+    always @(posedge clk_sys) begin
+        copck_acc <= copck_sum[31:0];
+    end
+    assign copck2x_en = copck_sum[32];
+
+    // --- SCCCK_2x enable ~7.3728 MHz ---------------------------------------
+    // inc = round((7.3728 / 81.50016) * 2^32) = 388537773
+    reg [31:0] sccck_acc = 32'd0;
+    wire [32:0] sccck_sum = {1'b0, sccck_acc} + 33'd388537773;
+    always @(posedge clk_sys) begin
+        sccck_acc <= sccck_sum[31:0];
+    end
+    assign sccck2x_en = sccck_sum[32];
+
+    // --- usbclk enable ~12.00 MHz (USB HID is stubbed on MiSTer) ------------
+    // inc = round((12.00 / 81.50016) * 2^32) = 632386008
+    reg [31:0] usb_acc = 32'd0;
+    wire [32:0] usb_sum = {1'b0, usb_acc} + 33'd632386008;
+    always @(posedge clk_sys) begin
+        usb_acc <= usb_sum[31:0];
+    end
+    assign usbclk_en = usb_sum[32];
 
 endmodule

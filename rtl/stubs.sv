@@ -32,8 +32,8 @@ endmodule
 module usb_hid_host (
     input usbclk,
     input usbrst_n,
-    inout usb_dm,
-    inout usb_dp,
+    output usb_dm,
+    output usb_dp,
     input usb_dp_in,
     input usb_dm_in,
     output usb_oe,
@@ -45,6 +45,8 @@ module usb_hid_host (
     output [7:0] key_modifiers,
     output [7:0] key1
 );
+    assign usb_dm = 1'b0;
+    assign usb_dp = 1'b0;
     assign usb_oe = 1'b0;
     assign typ = 2'b00;
     assign report = 1'b0;

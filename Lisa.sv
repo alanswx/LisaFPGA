@@ -208,20 +208,20 @@ module emu (
         .ps2_mouse(ps2_mouse)
     );
 
-    // Main Clock PLL
+    // Single core PLL: produces only the 81.5 MHz master (clk_sys) and its
+    // phase-shifted SDRAM twin (clk_mem). Every other Lisa clock is divided from
+    // clk_sys inside top/clock_divider/dotck_mmcm. usbclk_12M comes back out of
+    // top as a divided clock.
     wire clk_sys;
     wire clk_mem;
-    wire clk_16m;
-    wire clk_scc;
+    wire usbclk_en;        // ~12MHz usbclk clock-enable strobe, generated inside top from clk_sys
     wire pll_locked;
 
     pll main_pll (
         .refclk(CLK_50M),
         .rst(1'b0),
-        .outclk_0(clk_sys),  // 81.5 MHz system clock
+        .outclk_0(clk_sys),  // 81.5 MHz system / master clock
         .outclk_1(clk_mem),  // 81.5 MHz phase-shifted clock for SDRAM
-        .outclk_2(clk_16m),  // 16.3 MHz
-        .outclk_3(clk_scc),  // 7.3728 MHz
         .locked(pll_locked)
     );
 
@@ -383,7 +383,8 @@ module emu (
     wire kbd_out_sig;
 
     usb_keyboard_interface kbd_adapter_i (
-        .usbclk(clk_16m), // Wait, kbd FSM uses usbclk (12MHz? The clock_divider generates 12MHz, wait, here we feed clk_16m or divider. Let's use usbclk_12M!)
+        .clk_sys(clk_sys),
+        .usbclk_en(usbclk_en), // usb keyboard adapter runs on clk_sys paced by usbclk_en
         .usbrst(n_reset),
         .key_modifiers_in(hid_modifiers),
         .key1_in(hid_key_code),
@@ -397,11 +398,11 @@ module emu (
 
     // Mouse Adaptor
     wire [6:0] m_lisa_quad;
-    wire usbclk_12M;
 
-    // Use usbclk from the clock_divider module
+    // Use usbclk from the clock_divider module (via top's usbclk output)
     usb_mouse_interface mouse_adapter_i (
-        .usbclk(usbclk_12M),
+        .clk_sys(clk_sys),
+        .usbclk_en(usbclk_en),
         .usbrst(n_reset),
         .mouse_dx_in(ps2_mouse[15:8]),
         .mouse_dy_in(-ps2_mouse[7:0]), // Invert Y delta for Mac/Lisa standard
@@ -445,7 +446,8 @@ module emu (
 
     // Instantiate Apple Lisa Motherboard core (top)
     top core (
-        .sysclk(CLK_50M), // Feed 50MHz directly; clock_divider and dotck_mmcm will handle it
+        .sysclk(CLK_50M), // Legacy 50MHz reference (still used by some sys-domain logic inside top)
+        .clk_sys(clk_sys), // 81.50016 MHz master; all Lisa clocks divided from this
 
         // Video
         ._VSYNC(_VSYNC_core),
@@ -566,7 +568,7 @@ module emu (
         .SPEED_SEL(status[6:5]),
         .CPU_ROM_SEL(status[7]),
         .IO_ROM_SEL(status[8]),
-        .usbclk(usbclk_12M)
+        .usbclk_en(usbclk_en)
     );
 
 endmodule

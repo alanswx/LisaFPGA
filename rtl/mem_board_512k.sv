@@ -36,7 +36,8 @@ module mem_board_512k(
     input logic VA10,
 
     // The 20-ish MHz dot clock
-    input logic DOTCK,
+    input logic clk_sys,
+    input logic dotck_en,
     // Upper and lower data strobes
     input wire _UDS,
     input wire _LDS,
@@ -118,9 +119,11 @@ module mem_board_512k(
 
     // Latch the RAM address whenever CAS goes low
     // The original logic continually latches it until CAS goes low and then stops, so that's what we do too
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         if (_CAS) begin
             buffered_RA <= RA;
+        end
         end
     end
 
@@ -274,7 +277,7 @@ module mem_board_512k(
     `ifdef SIMULATION
         assign disable_parity = 1'b0; // In simulation, we always want parity checking enabled since we're using 18-bit wide block RAMs
         RAM_matrix low_byte_matrix(
-            .clk(DOTCK),
+            .clk(clk_sys),
             .A(buffered_RA),
             .MD(MD_IN[7:0]),
             .PI(PIL),
@@ -286,7 +289,7 @@ module mem_board_512k(
         );
 
         RAM_matrix high_byte_matrix(
-            .clk(DOTCK),
+            .clk(clk_sys),
             .A(buffered_RA),
             .MD(MD_IN[15:8]),
             .PI(PIU),
@@ -300,7 +303,7 @@ module mem_board_512k(
         // Otherwise, instantiate the SDRAM controller to drive real SDRAM chips
         assign disable_parity = 1'b1; // When using real SDRAM, we don't want parity checking since SDRAM doesn't support it
         SDRAM_Controller_Banked SDRAM_2MB(
-            .clk(DOTCK),
+            .clk(clk_sys),
             .A(buffered_RA),
             .MD(MD),
             .R_W(MREAD),

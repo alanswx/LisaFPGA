@@ -72,7 +72,8 @@ module CPU_board(
     (* MARK_DEBUG = "TRUE" *) output logic A17,
     (* MARK_DEBUG = "TRUE" *) output logic A18,
     (* MARK_DEBUG = "TRUE" *) output logic A19,
-    input logic DOTCK,
+    input logic clk_sys,
+    input logic dotck_en,
     output logic MREAD,
     output logic _CAS,
     output logic _RAS,
@@ -171,7 +172,8 @@ module CPU_board(
     // The only ones we don't need to do are HPIR and IOIR since they're synchronized when derived from their individual signals elsewhere in this file
     (* ASYNC_REG = "TRUE" *) logic _RSIR_int, _INT0_int, _INT1_int, _INT2_int, _KBIR_int;
     (* ASYNC_REG = "TRUE" *) logic _RSIR_sync, _INT0_sync, _INT1_sync, _INT2_sync, _KBIR_sync;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         _RSIR_int <= _RSIR;
         _INT0_int <= _INT0;
         _INT1_int <= _INT1;
@@ -182,6 +184,7 @@ module CPU_board(
         _INT1_sync <= _INT1_int;
         _INT2_sync <= _INT2_int;
         _KBIR_sync <= _KBIR_int;
+        end
     end
     encoder_8to3_LS148 IRQ_encoder(
         ._D({_HPIR, _RSIR_sync, _INT0_sync, _INT1_sync, _INT2_sync, _KBIR_sync, _IOIR_internal, _IOIR_internal}),
@@ -197,7 +200,8 @@ module CPU_board(
     logic fast_reset;
     logic _HALTOUT_CPU;
     logic _RSTOUT_CPU;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If the reset switch is being pressed, then clear the reset counter, and set _RSTHLT_555 low since we're now in reset
         // Same goes for if the CPU itself is requesting a halt; on the Lisa, this just leads to an immediate reset
         if (!_RSTSW || !_HALTOUT_CPU) begin
@@ -222,6 +226,7 @@ module CPU_board(
         end
         // Reset is just the 555 reset/halt signal wire-ANDed (or just ANDed in our case) with the CPU RESET output
         _RESET = _RSTHLT_555 & _RSTOUT_CPU;
+        end
     end
 
     // The system-wide halt signal is asserted if either the 555 halt or the CPU-generated halt is asserted
@@ -253,13 +258,13 @@ module CPU_board(
             end
         end
     end*/
-    always_ff @(posedge DOTCK, negedge _RESET) begin
+    always_ff @(posedge clk_sys, negedge _RESET) begin
         // If the Lisa is in reset, then reset the counter and make sure _BUST is deasserted
         if (!_RESET) begin
             bust_counter <= 16'b0;
             _BUST <= 1'b1;
         // Otherwise, we need to see if we have a bus error or not
-        end else begin
+        end else if (dotck_en) begin
             // Reset the counter and deassert _BUST whenever _AS is high
             if (_AS) begin
                 bust_counter <= 16'b0;
@@ -341,11 +346,13 @@ module CPU_board(
     logic _RMEA;
     // Latch the proper bits of the address and the VIDEO bit
     logic mea_latch_we, mea_latch_we_prev;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         if (mea_latch_we && !mea_latch_we_prev) begin
             mea_latch <= {A[20:6], VIDEO};
         end
         mea_latch_we_prev <= mea_latch_we;
+        end
     end
     // Put the latched data on the bus if the CPU wants to read the latch, otherwise tri-state it
     assign BD = _RMEA ? 16'bz : mea_latch;
@@ -361,11 +368,13 @@ module CPU_board(
     assign dma_latch_oe = ~_BGACK & ~_CMUX;
     logic [7:0] dma_latch;
     logic _LDMA_prev;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         if (_LDMA && !_LDMA_prev) begin
             dma_latch <= BD[12:5];
         end
         _LDMA_prev <= _LDMA;
+        end
     end
     assign A[20:13] = dma_latch_oe ? dma_latch : 8'bz;
 
@@ -441,22 +450,24 @@ module CPU_board(
     // I guess we really need to synchronize _VTIR too, given that it's in an always block that isn't clocked by DOTCK either
     (* ASYNC_REG = "TRUE" *) logic _IOIR_int, _IOIR_sync;
     (* ASYNC_REG = "TRUE" *) logic _VTIR_int, _VTIR_sync;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         _IOIR_int <= _IOIR;
         _IOIR_sync <= _IOIR_int;
         _VTIR_int <= _VTIR;
         _VTIR_sync <= _VTIR_int;
         _IOIR_internal <= _VTIR_sync & _IOIR_sync;
+        end
     end
 
     // Same idea for _BUST too
     // Unlike the others, there should never be a situation here where both signals are asserted at once, but account for it anyway
     // Here we also need to account for the reset condition, in which case we want _BUST_latched to be deasserted
     //always @(_RMEA, _BUST, _RESET) begin
-    always_ff @(posedge DOTCK, negedge _RESET) begin
+    always_ff @(posedge clk_sys, negedge _RESET) begin
         if (!_RESET) begin
             _BUST_latched <= 1'b1;
-        end else begin
+        end else if (dotck_en) begin
             if (!_BUST & _RMEA) begin
                 _BUST_latched <= 1'b0;
             end else if (!_RMEA) begin
@@ -481,7 +492,8 @@ module CPU_board(
     (* ASYNC_REG = "TRUE" *) logic _NMI_int, _NMI_sync;
     (* ASYNC_REG = "TRUE" *) logic _HDER_latched_int, _HDER_latched_sync;
     (* ASYNC_REG = "TRUE" *) logic _SFER_latched_int, _SFER_latched_sync;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         _NMI_int <= _NMI;
         _NMI_sync <= _NMI_int;
         _HDER_latched_int <= _HDER_latched;
@@ -489,6 +501,7 @@ module CPU_board(
         _SFER_latched_int <= _SFER_latched;
         _SFER_latched_sync <= _SFER_latched_int;
         _HPIR <= _NMI_sync & _HDER_latched_sync & _SFER_latched_sync;
+        end
     end
     // The other is the clock for the memory error address latch
     // The latch gets commanded to latch the address on every memory cycle, and stops as soon as we get a memory error
@@ -504,12 +517,13 @@ module CPU_board(
     logic PCK;
     logic [7:0] _T;
     // This takes the form of a JK flip-flop
-    always_ff @(posedge DOTCK, negedge _RESET) begin
+    always_ff @(posedge clk_sys, negedge _RESET) begin
         // If we're in reset, deassert _MMU_reg_WE
         if (!_RESET) begin
             _MMU_reg_WE <= 1'b1;
+        end else if (dotck_en) begin
         // If we're not doing an MMUIO cycle, then we shouldn't be writing to the MMU regs (async preset)
-        end else if (_MMUIO) begin
+        if (_MMUIO) begin
             _MMU_reg_WE <= 1'b1;
         end else begin
             // If the write/_T4 and PCK high conditions are met at the same time, then this turns into a T flip-flop
@@ -523,7 +537,8 @@ module CPU_board(
             end else if ((READ | _T[4]) & PCK) begin
                 // If the clock is high and the write and timing state conditions aren't valid, then deassert it
                 _MMU_reg_WE <= 1'b1;
-            end 
+            end
+        end
         end
     end
 
@@ -532,11 +547,11 @@ module CPU_board(
     // The logic for this one is pretty simple b/c the J input to the flop is tied to ground
     // Once again, our logic is slightly different than that of the original schematic
     logic _MMU_reg_dat_OE;
-    always_ff @(posedge DOTCK, posedge _MMUIO) begin
+    always_ff @(posedge clk_sys, posedge _MMUIO) begin
         // If the MMUIO cycle is over (or we're not doing one at all), then we shouldn't be hooking the MMU regs to the UD bus
         if (_MMUIO) begin
             _MMU_reg_dat_OE <= 1'b1;
-        end else begin
+        end else if (dotck_en) begin
             // Otherwise, if we are in an MMU cycle, connect the regs to the UD bus whenever we're in timing state T4
             // It'll stay connected until the MMU cycle is over
             if (!_T[4]) begin
@@ -597,7 +612,7 @@ module CPU_board(
     // This simulates the pull-up resistors on the original board
     // For some reason, setting MMU_RAM_out to tri1 doesn't work, so we have to do it that way instead
     MMU_RAM_2148 low_MMU_RAM(
-        .clk(DOTCK),
+        .clk(clk_sys),
         .A_MMU({UA[19:17], UA[21], UA[22], UA[23], MS2, UA[20], B_L, MS1}),
         ._CS(1'b0),
         ._WE(_MMU_reg_WE),
@@ -605,7 +620,7 @@ module CPU_board(
         .D_out(MMU_RAM_out[3:0])
     );
     MMU_RAM_2148 mid_MMU_RAM(
-        .clk(DOTCK),
+        .clk(clk_sys),
         .A_MMU({UA[19:17], UA[21], UA[22], UA[23], MS2, UA[20], B_L, MS1}),
         ._CS(1'b0),
         ._WE(_MMU_reg_WE),
@@ -613,7 +628,7 @@ module CPU_board(
         .D_out(MMU_RAM_out[7:4])
     );
     MMU_RAM_2148 high_MMU_RAM(
-        .clk(DOTCK),
+        .clk(clk_sys),
         .A_MMU({UA[19:17], UA[21], UA[22], UA[23], MS2, UA[20], B_L, MS1}),
         ._CS(_MMU_highreg_CS),
         ._WE(_MMU_reg_WE),
@@ -688,11 +703,11 @@ module CPU_board(
     // _VAL is the latch signal for the vid addr latch
     logic _VAL, _VAL_prev;
     logic [7:0] VAL_output;
-    always_ff @(posedge DOTCK, negedge _RESET) begin
+    always_ff @(posedge clk_sys, negedge _RESET) begin
         if (!_RESET) begin
             // Clear it if we're in reset, just to make sure that it's in a known state instead of XXXXX
             VAL_output <= 8'b0;
-        end else begin
+        end else if (dotck_en) begin
             if (!_VAL && _VAL_prev) begin
                 // Put the video address in the top part of the output, then a 0, and then the LED value
                 VAL_output <= {UD_CPU_out[5:0], 1'b0, UD_CPU_out[7]};
@@ -735,7 +750,8 @@ module CPU_board(
     logic [3:0] Q_counter;
     logic _VT7;
     // Clock the counter on DOTCK
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If the system gets reset, put the counter in a known state (outputs 0, carry out deasserted)
         // It's important that we come out of fast_reset 5 cycles before coming out of regular reset
         // This way, the counter will be synchronized with the 68K and the rest of the system properly when it all comes out of reset
@@ -755,6 +771,7 @@ module CPU_board(
             end
             // Increment the counter/output on each clock
             Q_counter <= Q_counter + 4'b1;
+        end
         end
     end
     
@@ -795,7 +812,8 @@ module CPU_board(
     // And now we need to actually implement the _BERR flip-flop
     // The K input is permanently deasserted, so we just have J (_BERR_unlatched), preset (_BUST), and clear (AS)
     logic _BERR;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If we get a bus error indicated by _BUST, then preset the flop
         if (!_BUST) begin
             _BERR <= 1'b0;
@@ -808,6 +826,7 @@ module CPU_board(
                 _BERR <= 1'b0;
             end
         end
+        end
     end
 
     // Now the RAS flip-flop
@@ -815,7 +834,8 @@ module CPU_board(
     // This would mean that we're in between CPU and video cycles, so we don't want to assert RAS
     logic _RAS_inhibit;
     assign _RAS_inhibit = VIDEO | CPUC1;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If RAS is inhibited, deassert it right away (async clear)
         if (!_RAS_inhibit) begin
             _RAS <= 1'b1;
@@ -826,6 +846,7 @@ module CPU_board(
             end else if (!_T[5]) begin
                 _RAS <= 1'b1;
             end
+        end
         end
     end
 
@@ -840,7 +861,8 @@ module CPU_board(
     assign MCY = ~_MEM & CPUC1;
     // We set the SPIO latch if BGACK says we're the bus master, this isn't a memory cycle, the stuff we're trying to access isn't read-only, we're in a CPU cycle not a video cycle, and we're in timing state T2
     assign SPIO_unlatched = ~(~_BGACK | MCY | ~_RO | ~CPUC1 | _T[2]);
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If AS is pulsed, then clear the SPIO latch (async clear)
         if (_AS) begin
             _SPIO <= 1'b1;
@@ -849,6 +871,7 @@ module CPU_board(
             if (SPIO_unlatched) begin
                 _SPIO <= 1'b0;
             end
+        end
         end
     end
 
@@ -871,7 +894,8 @@ module CPU_board(
     // And not if something else is the master and currently controls the bus
     assign _full_CAS_inhibit = ~(MMU_CAS_inhibit & ~VIDEO & ~(~_BGACK & CPUC1));
     // Now the flip-flop itself
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If CAS is inhibited, deassert it right away (async clear)
         if (!_full_CAS_inhibit) begin
             _CAS <= 1'b1;
@@ -882,6 +906,7 @@ module CPU_board(
             end else if (!_T[6]) begin
                 _CAS <= 1'b1;
             end
+        end
         end
     end
 
@@ -894,7 +919,8 @@ module CPU_board(
     // Note that we just look at ACCK here instead of XORing with _STK like we did for CAS because it's impossible to have an I/O stack seg
     assign IOCY_unlatched = ~(~_BGACK | _T[2] | ACCK | _IO | ~CPUC1);
     // Now the flop itself
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If AS is pulsed, then clear the IOCY latch (async clear)
         if (_AS) begin
             _IOCY <= 1'b1;
@@ -903,6 +929,7 @@ module CPU_board(
             if (IOCY_unlatched) begin
                 _IOCY <= 1'b0;
             end
+        end
         end
     end
 
@@ -916,7 +943,8 @@ module CPU_board(
     // IAK is not asserted (we're not doing an interrupt acknowledge), and we're not in an I/O cycle
     assign CPUC1_unlatched = ~(~_BERR | _AS | _VT7 | IAK | ~_IOCY);
     // Now the flip-flop itself
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If both the set and clear conditions are met at the same time, then turn it into a T flip flop
         // This should never actually happen though
         if (CPUC1_unlatched & VIDEO) begin
@@ -928,6 +956,7 @@ module CPU_board(
             // And clear it if VIDEO is asserted
             CPUC1 <= 1'b0;
         end
+        end
     end
 
     // Second to last one: the _CMUX flip-flop
@@ -937,7 +966,8 @@ module CPU_board(
     // So the clear condition will be true in both CPU and video cycles, but the set condition only in video cycles
     // Meaning that the flop will will always be cleared at T6 in a CPU cycle, but will be both set and cleared in a video cycle
     // Which leads to a toggle, but since it always goes into this in the cleared state, it's equivalent to just setting it
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If both the set and clear conditions (AKA just the set condition) are met at the same time, then turn it into a T flip flop
         if (!_T[6] & VIDEO) begin
             _CMUX <= ~_CMUX;
@@ -945,19 +975,22 @@ module CPU_board(
             // Otherwise, clear the flop if we're in timing state T6
             _CMUX <= 1'b1;
         end
+        end
     end
 
     // And last but not least: _MALE (the memory address latch enable flip-flop)
     // This one's only inputs are asynchronous preset and synchronous clear
     // We async preset whenever AS is deasserted (the address is on the bus, so it's time to latch it)
     // And we sync clear it when the CPUC1_unlatched conditions are met (basically start of a CPU cycle as long as nothing weird's going on)
-    always_ff @(posedge DOTCK, posedge _AS) begin
+    always_ff @(posedge clk_sys, posedge _AS) begin
         // If AS is deasserted, preset the latch (async preset)
         if (_AS) begin
             _MALE <= 1'b0;
-        end else if (CPUC1_unlatched) begin
+        end else if (dotck_en) begin
             // Otherwise, if the CPUC1_unlatched conditions are met, clear the latch
-            _MALE <= 1'b1;
+            if (CPUC1_unlatched) begin
+                _MALE <= 1'b1;
+            end
         end
     end
 
@@ -965,11 +998,11 @@ module CPU_board(
     // First we'll do a decoder that generates selection signals for the I/O board and expansion cards
     // It requires a chip select signal based on IOCY
     logic IOCY_CS;
-    always_ff @(posedge DOTCK, posedge _IOCY) begin
+    always_ff @(posedge clk_sys, posedge _IOCY) begin
         // If IOCY is deasserted, deassert the chip select right away (async clear)s
         if (_IOCY) begin
             IOCY_CS <= 1'b0;
-        end else begin
+        end else if (dotck_en) begin
             // Otherwise, assert it when _IOCY gets asserted
             IOCY_CS <= 1'b1;
         end
@@ -1090,15 +1123,17 @@ module CPU_board(
     logic SFER_int;
     addressable_latch_LS259 sys_ctrl_latch(
         // Use the DOTCK as the master clock; the _G input is used as a clock enable within the LS259 module
-        .clk(DOTCK),
+        .clk(clk_sys),
         // It's addressed by A4-A2
         .A(A[4:2]),
         // And really by A1 too; it's used as the data input
         // If A1 is high, then we set the bit, if it's low then we clear it
         // And given that this latch doesn't care about the state of READ, we can actually write to it by reading from it
         .D(A[1]),
-        // The write enable is that signal from the CPU board decoder
-        ._G(sys_ctrl_latch_WE),
+        // The write enable is that signal from the CPU board decoder.
+        // Force it inactive except on dotck_en cycles so the LS259 (clocked by the
+        // fast clk_sys now) still latches exactly once per DOTCK tick.
+        ._G(sys_ctrl_latch_WE | ~dotck_en),
         // We clear the latch when we halt the system
         ._CLR(_HALT),
         // And its outputs are a lot of familiar signals from earlier
@@ -1139,12 +1174,12 @@ module CPU_board(
     end*/
     // The new synchronous version of that:
     logic VIDEO_prev;
-    always_ff @(posedge DOTCK, negedge _RESET) begin
+    always_ff @(posedge clk_sys, negedge _RESET) begin
         // Clear the counter if we're in reset
         if (!_RESET) begin
             VSROM_address <= 8'b0;
             VIDEO_prev <= 1'b0; // Clear out VIDEO_prev too
-        end else begin
+        end else if (dotck_en) begin
             // If the VSROM_address_clr signal is asserted, clear the counter
             if (VSROM_address_clr) begin
                 VSROM_address <= 8'b0;
@@ -1196,7 +1231,8 @@ module CPU_board(
         _HSYNC <= VSROM_data[6];
     end*/
     // New synchronous version of that:
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If we're on the rising edge of VIDEO, latch the VSROM outputs into the appropriate signals
         if (VIDEO && !VIDEO_prev) begin
             // This is the clear signal for the VSROM address counter
@@ -1212,6 +1248,7 @@ module CPU_board(
             _HSYNC <= VSROM_data[6];
         end
         // No need to update VIDEO_prev since that's already done above
+        end
     end
 
     // Now make the actual _VSIR signal; it gets asserted when VSIR_int is asserted and VA_overflow (which we haven't made yet) is asserted
@@ -1235,7 +1272,8 @@ module CPU_board(
     end*/
     // New synchronous version of that:
     logic _clr_vid_clk_prev;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // If VIDEO is low (we're not in a video cycle) or _clr_vid_clk is asserted, inhibit the clock by holding it high
         if (!VIDEO || !_clr_vid_clk) begin
             vid_addr_clk <= 1'b1;
@@ -1246,6 +1284,7 @@ module CPU_board(
         // Update our previous _clr_vid_clk signal for edge detection in the next cycle
         // No need to do VIDEO_prev since we did that in an earlier always_ff also clocked by DOTCK
         _clr_vid_clk_prev <= _clr_vid_clk;
+        end
     end
 
     // Now we can make the actual video address counter
@@ -1266,12 +1305,12 @@ module CPU_board(
     end*/
     // New synchronous version of that:
     logic vid_addr_clk_prev;
-    always_ff @(posedge DOTCK, negedge _RESET) begin
+    always_ff @(posedge clk_sys, negedge _RESET) begin
         // If _RESET is asserted, then clear the counter and also vid_addr_clk_prev
         if (!_RESET) begin
             vid_addr_counter <= 16'b0;
             vid_addr_clk_prev <= 1'b0;
-        end else begin
+        end else if (dotck_en) begin
             if (full_vid_addr_counter_clr) begin
                 // If the clear conditions are met, clear the counter
                 vid_addr_counter <= 16'b0;
@@ -1295,7 +1334,8 @@ module CPU_board(
     // Shifting is inhibited whenever bit 14 of the video address counter goes high, so that we don't shift out garbage when we're outside the visible area
     logic [15:0] vid_shift_reg;
     logic vid_shift_out;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         // No matter what, the output bit is always the MSB of the shift register
         vid_shift_out <= vid_shift_reg[15];
         // If we want to load the shift register, then stick MD into it
@@ -1310,12 +1350,15 @@ module CPU_board(
                 vid_shift_reg <= {vid_shift_reg[14:0], INVID};
             end
         end
+        end
     end
 
     // The video output from the shift register goes through a D flip-flop; not sure what the purpose of this is, but we'll do it anyway
     logic vid_shift_out_ff;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         vid_shift_out_ff <= vid_shift_out;
+        end
     end
 
     // And then finally, we produce VID by XORing this video signal with INVID, allowing us to invert the video by setting INVID
@@ -1339,13 +1382,15 @@ module CPU_board(
     // enPhi1 should fall on the rising edge of PCK, and enPhi2 should fall on the falling edge of PCK
     // Both should rise one cycle before they fall
     logic enPhi1, enPhi2;
-    assign enPhi1 = Q_counter[0] & ~PCK;
-    assign enPhi2 = Q_counter[0] & PCK;
+    // Gate the 68000 phase enables with dotck_en so the CPU still advances at the
+    // DOTCK rate even though it is now clocked by the fast clk_sys master.
+    assign enPhi1 = dotck_en & Q_counter[0] & ~PCK;
+    assign enPhi2 = dotck_en & Q_counter[0] & PCK;
 
     // And then we'll just feed the core DOTCK as its clk input; it's 4x the desired clock speed, but that should be fine
     // Since the actual speed is regulated by enPhi1 and enPhi2 anyway
     fx68k M68K(
-        .clk(DOTCK), // in
+        .clk(clk_sys), // in
         .HALTn(_RSTHLT_555), // in
         .extReset(~_RSTHLT_555), // in
         .pwrUp(~_RSTHLT_555), // Not a thing on the actual 68K, but our core needs it; just a copy of RESET

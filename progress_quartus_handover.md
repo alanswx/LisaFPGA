@@ -1,48 +1,83 @@
 # Quartus Compilation Handover & Progress Report
 
-This document outlines the changes made to resolve compilation and synthesis errors in the Apple Lisa MiSTer core target, and provides instructions for the agent on the Quartus machine.
+This document tracks the work to get the Apple Lisa MiSTer core (Cyclone V,
+DE10-Nano `5CSEBA6U23I7`) compiling and closing timing in Quartus 17.0.2.
 
-## 1. Summary of Resolved Issues
+## Current status: **BUILDS to a bitstream** ✅
 
-We have successfully resolved all syntax, structural reset, entity instantiation, and RAM initialization synthesis errors encountered in the previous builds.
+A full `quartus_sh --flow compile Lisa` succeeds:
 
-### Key Fixes:
-1. **妈妈board (Lisa.sv / top.sv) - Hierarchical Reference Error**:
-   * Resolved a non-synthesizable hierarchical assignment (`assign usbclk_12M = core.usbclk;`) by exposing `usbclk` as a module output port on `top.sv` and mapping it directly in `Lisa.sv`.
-2. **Profile Emulator (profile.sv) - Multiple Constant Drivers**:
-   * Merged the HPS cache write logic into the main state machine clock block to prevent synthesis conflicts on `cache_data`.
-3. **Asynchronous Resets (6502.v / via6522.v)**:
-   * Restructured asynchronous reset always blocks to ensure the reset signal is isolated in the first conditional statement as strictly required by Quartus.
-4. **Missing/Undefined Entities (stubs.sv & files.qip)**:
-   * Added the missing `usb_mouse_interface.sv` back to `files.qip`.
-   * Created a clean stubs file [rtl/stubs.sv](file:///Users/alans/Documents/development/LisaFPGA/rtl/stubs.sv) to define dummy entities for Xilinx-specific `BUFG` primitives and standalone-only modules (`HDMI_Interface`, `usb_hid_host`). Added it to `files.qip`.
-5. **Wrapper Port Mismatch (Lisa.sv)**:
-   * Exposed missing `ADC_BUS`, `DDRAM_*`, and `HDMI_*` width/height ports on the `emu` module in `Lisa.sv` to match the connections in the MiSTer framework's top-level wrapper `sys_top.v`.
-6. **RAM Initialization Synthesis Error (MMU_RAM_2148.sv / CPU_board.sv)**:
-   * Changed the MMU RAM write process from an asynchronous latch-based loop (which Quartus could not initialize on Cyclone V) to a synchronous register-based loop clocked on `DOTCK`.
+- Analysis & Synthesis, Fitter, Assembler, Timing Analyzer: **0 errors**.
+- Outputs: `output_files/Lisa.sof` and `output_files/Lisa.rbf` (the MiSTer bitstream).
+- Timing is essentially closed: worst-case **setup −0.609 ns**, **hold −0.576 ns**
+  on the core clock, both sub-nanosecond (down from −39.7 ns before the fixes).
+
+Open items are tracked in **[todo.md](todo.md)** (functional verification, the last
+sub-ns timing paths, and the intentionally-deferred SCC/FPU work).
 
 ---
 
-## 2. Walkthrough of Modified Files
+## 1. Early fixes (synthesis / fitter)
 
-* [Lisa.sv](file:///Users/alans/Documents/development/LisaFPGA/Lisa.sv): Connected the exposed ports to match `sys_top.v`'s instantiation of `emu`.
-* [rtl/top.sv](file:///Users/alans/Documents/development/LisaFPGA/rtl/top.sv): Declared the `usbclk` output port.
-* [rtl/profile.sv](file:///Users/alans/Documents/development/LisaFPGA/rtl/profile.sv): Unified cache write drivers.
-* [rtl/6502.v](file:///Users/alans/Documents/development/LisaFPGA/rtl/6502.v) & [rtl/via6522.v](file:///Users/alans/Documents/development/LisaFPGA/rtl/via6522.v): Corrected async reset templates.
-* [rtl/stubs.sv](file:///Users/alans/Documents/development/LisaFPGA/rtl/stubs.sv): Stubbed `BUFG`, `HDMI_Interface`, and `usb_hid_host`.
-* [files.qip](file:///Users/alans/Documents/development/LisaFPGA/files.qip): Added `stubs.sv` and `usb_mouse_interface.sv`.
-* [rtl/MMU_RAM_2148.sv](file:///Users/alans/Documents/development/LisaFPGA/rtl/MMU_RAM_2148.sv) & [rtl/CPU_board.sv](file:///Users/alans/Documents/development/LisaFPGA/rtl/CPU_board.sv): Added `clk` input to the MMU SRAM model and clocked the write path to enable synthesis of the initialized RAM arrays.
+1. **Hierarchical reference** (`Lisa.sv`/`top.sv`): exposed `usbclk` as a real port
+   instead of a non-synthesizable hierarchical `assign`.
+2. **Multiple constant drivers** (`profile.sv`): merged HPS cache write logic into
+   the main state-machine clock block.
+3. **Async resets** (`6502.v`/`via6522.v`): isolated the reset in the first
+   conditional as Quartus requires.
+4. **Missing entities** (`stubs.sv`/`files.qip`): re-added `usb_mouse_interface.sv`;
+   created `rtl/stubs.sv` stubbing `BUFG`, `HDMI_Interface`, `usb_hid_host`. Later
+   fixed the stub's `usb_dm`/`usb_dp` from `inout` to `output` (they were wired to
+   `logic` variables in `top.sv`, which is illegal for `inout`).
+5. **Wrapper port mismatch** (`Lisa.sv`): exposed `ADC_BUS`, `DDRAM_*`, `HDMI_*`
+   ports on `emu` to match `sys_top.v`.
+6. **RAM init synthesis** (`MMU_RAM_2148.sv`/`CPU_board.sv`): made the MMU SRAM write
+   synchronous so Quartus can initialize the array on Cyclone V.
+
+## 2. The real blocker: PLL budget → single-clock rewrite
+
+Once synthesis passed, the **Fitter failed**: the core wanted three PLLs
+(`main_pll`, `clock_divider`'s PLL, `dotck_mmcm`'s PLL) but only one fractional-PLL
+slot reachable from the 50 MHz input was free after the MiSTer framework's PLLs, so
+`dotck_mmcm` could not be placed. Reducing to fewer PLLs but keeping derived
+*clocks* (counters/accumulators used as clock nets) then failed to **route** — the
+fabric-routed derived clocks blew up hold timing.
+
+**Fix (per project direction): one clock + clock enables.** The core was converted
+to run entirely on a single 81.50016 MHz master `clk_sys` (straight off the one PLL,
+on a global clock network), with every former clock replaced by a one-cycle
+**clock-enable strobe**:
+
+- `rtl/pll.sv` — now the **only** core PLL: `clk_sys` + phase-shifted SDRAM `clk_mem`.
+- `rtl/clock_divider.v` — repurposed as the **enable generator**: `dotck_en`
+  (speed-selectable), `c16m_en` (÷5), `c5m_en` (÷16), and `copck2x_en` /
+  `sccck2x_en` / `usbclk_en` (phase-accumulator carry strobes). The DOTCK speed mux
+  is folded in here.
+- `rtl/dotck_mmcm.v` — no longer instantiated (its PLL is gone).
+- Every module now uses `@(posedge clk_sys) if (x_en)` instead of a dedicated clock:
+  `top.sv`, `CPU_board.sv` (incl. fx68k `enPhi1/2` gated by `dotck_en`),
+  `IO_board.sv`, `mem_board_2mb/512k.sv`, `usb_keyboard_interface.sv`,
+  `usb_mouse_interface.sv`, `Lite_Adapter.sv`. Enable-ready sub-models (fx68k, 6502
+  COP, `via6522`, `LS259`, `LS323`) were fed `clk_sys` with their enable gated by the
+  rate strobe. ON-gating and the DOTCK clock mux collapsed into enable masking.
+- `z8530_scc` (SCC) and `AM9512_FPU` were left on raw `clk_sys` for now (serial/FPU
+  rate deferred — see todo.md); non-critical for boot/video/keyboard bring-up.
+
+## 3. Timing
+
+`sys/sys_top.sdc` line 14 declares the core-PLL clocks asynchronous to the framework
+audio/HDMI/HPS clocks, but its filter `*|pll|pll_inst|...` did not match our PLL
+(`emu|main_pll|...`), so cross-domain paths were analyzed as synchronous → large
+**false** violations. Changed the filter to `*|main_pll|...`; worst-case setup slack
+went from −39.7 ns to −4.7 ns, and after rebuilding (fitter focusing on real paths)
+to **−0.6 ns**.
 
 ---
 
-## 3. Next Steps on the Quartus Machine
+## 4. Next steps
 
-1. **Pull the latest commit**:
-   ```bash
-   git pull
-   ```
-2. **Run the compile / build command**:
-   Execute the project's build command or compile script.
-3. **Verify the error log (`err`)**:
-   * If compilation succeeds, verify that the output `.rbf` or `.sof` file is generated.
-   * If compilation fails, check the `err` file for any new synthesis, fitting, or timing errors.
+1. **Program `output_files/Lisa.rbf` on the DE10-Nano and verify functionally**
+   (boot ROM, video, keyboard/mouse via the COP). The conversion was validated
+   structurally — it builds, routes, and times — but not yet functionally.
+2. Close the last sub-ns timing paths and do the deferred SCC/FPU enable work — all
+   detailed in **[todo.md](todo.md)**.

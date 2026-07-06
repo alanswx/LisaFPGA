@@ -1,40 +1,32 @@
 // dotck_mmcm.v
-// Emulation of Xilinx dotck_mmcm using Altera PLL
+// Generates the selectable Lisa dot clocks by dividing the 81.50016 MHz master
+// clock (clk_sys) instead of using a dedicated PLL. The dot-clock speeds are
+// exact sub-multiples of the master:
+//     dotck_80M = 81.50016 MHz  = clk_sys / 1
+//     dotck_40M = 40.75008 MHz  = clk_sys / 2
+//     dotck_20M = 20.37504 MHz  = clk_sys / 4
+// dotck_60M (61.12512 MHz = clk_sys * 3/4) is NOT an integer divide, so it is
+// aliased to dotck_40M for now. Proper 60 MHz turbo needs the single-clock +
+// clock-enable rewrite. See todo.md.
 
 `timescale 1 ps / 1 ps
 
 module dotck_mmcm (
-    input  wire  sysclk,     // 50 MHz input
-    output wire  dotck_20M,  // 20.37504 MHz
-    output wire  dotck_40M,  // 40.75008 MHz
-    output wire  dotck_60M,  // 61.12512 MHz
-    output wire  dotck_80M   // 81.50016 MHz
+    input  wire  clk_sys,    // 81.50016 MHz master clock
+    output wire  dotck_20M,  // 20.37504 MHz (clk_sys / 4)
+    output wire  dotck_40M,  // 40.75008 MHz (clk_sys / 2)
+    output wire  dotck_60M,  // 61.12512 MHz -- aliased to 40M (see header / todo.md)
+    output wire  dotck_80M   // 81.50016 MHz (clk_sys)
 );
 
-    wire locked;
+    reg [1:0] div_cnt = 2'b00;
+    always @(posedge clk_sys) begin
+        div_cnt <= div_cnt + 2'b01;
+    end
 
-    altera_pll #(
-        .fractional_vco_multiplier("true"),
-        .reference_clock_frequency("50.0 MHz"),
-        .operation_mode("direct"),
-        .number_of_clocks(4),
-        .output_clock_frequency0("20.37504 MHz"),
-        .phase_shift0("0 ps"),
-        .duty_cycle0(50),
-        .output_clock_frequency1("40.75008 MHz"),
-        .phase_shift1("0 ps"),
-        .duty_cycle1(50),
-        .output_clock_frequency2("61.12512 MHz"),
-        .phase_shift2("0 ps"),
-        .duty_cycle2(50),
-        .output_clock_frequency3("81.50016 MHz"),
-        .phase_shift3("0 ps"),
-        .duty_cycle3(50)
-    ) pll_i (
-        .refclk(sysclk),
-        .rst(1'b0),
-        .outclk({dotck_80M, dotck_60M, dotck_40M, dotck_20M}),
-        .locked(locked)
-    );
+    assign dotck_40M = div_cnt[0]; // 81.5 / 2
+    assign dotck_20M = div_cnt[1]; // 81.5 / 4
+    assign dotck_80M = clk_sys;    // 81.5 / 1
+    assign dotck_60M = div_cnt[0]; // TODO(todo.md): 60MHz turbo not achievable by integer divide; aliased to 40M
 
 endmodule

@@ -21,7 +21,8 @@
 
 
 module usb_mouse_interface(
-    input logic usbclk,
+    input logic clk_sys,
+    input logic usbclk_en,
     input logic usbrst,
     input logic signed [7:0] mouse_dx_in,
     input logic signed [7:0] mouse_dy_in,
@@ -39,13 +40,13 @@ module usb_mouse_interface(
     logic signed [7:0] mouse_dy;
 
     // Now latch the button states on report
-    always_ff @(posedge usbclk, negedge usbrst) begin
+    always_ff @(posedge clk_sys, negedge usbrst) begin
         // On reset, clear all the latched values
         if (!usbrst) begin
             left <= 1'b0;
             right <= 1'b0;
             middle <= 1'b0;
-        end else if (report) begin
+        end else if (usbclk_en) if (report) begin
             // If report is asserted, latch the button states and movement values
             mouse_dx <= mouse_dx_in;
             mouse_dy <= mouse_dy_in;
@@ -103,7 +104,8 @@ module usb_mouse_interface(
     assign x_pending = (x_accum != 0);
     assign y_pending = (y_accum != 0);
 
-    always @(posedge usbclk) begin
+    always @(posedge clk_sys) begin
+        if (usbclk_en) begin
         if (!usbrst) begin
             divcnt  <= 0;
             x_phase <= 2'b00;
@@ -182,6 +184,7 @@ module usb_mouse_interface(
             end else begin
                 divcnt <= divcnt + 1;
             end
+        end
         end
     end
 

@@ -21,7 +21,8 @@
 
 
 module usb_keyboard_interface(
-    input logic usbclk,
+    input logic clk_sys,
+    input logic usbclk_en,
     input logic usbrst,
     input logic [7:0] key_modifiers_in,
     input logic [7:0] key1_in,
@@ -32,9 +33,11 @@ module usb_keyboard_interface(
 
     // First, let's synchronize KBD_in to the usbclk domain to avoid metastability issues
     (* ASYNC_REG = "TRUE" *) logic KBD_in_int, KBD_in_sync;
-    always_ff @(posedge usbclk) begin
-        KBD_in_int <= KBD_in;
-        KBD_in_sync <= KBD_in_int;
+    always_ff @(posedge clk_sys) begin
+        if (usbclk_en) begin
+            KBD_in_int <= KBD_in;
+            KBD_in_sync <= KBD_in_int;
+        end
     end
 
     // The latched versions of the key modifiers and key1
@@ -42,12 +45,12 @@ module usb_keyboard_interface(
     logic [7:0] key1;
 
     // Latch the key modifiers and keycodes on the rising edge of report
-    always_ff @(posedge usbclk, negedge usbrst) begin
+    always_ff @(posedge clk_sys, negedge usbrst) begin
         // On reset, clear all the latched values
         if (!usbrst) begin
             key_modifiers <= 8'b0;
             key1 <= 8'b0;
-        end else if (report) begin
+        end else if (usbclk_en) if (report) begin
             // If report is asserted, latch the key states
             key_modifiers <= key_modifiers_in;
             key1 <= key1_in;
@@ -256,7 +259,7 @@ module usb_keyboard_interface(
     // Boolean flag to say whether or not keycode was actually sent
     logic sent_keycode;
 
-    always_ff @(posedge usbclk, negedge usbrst) begin
+    always_ff @(posedge clk_sys, negedge usbrst) begin
         if (!usbrst) begin
             prev_key1 <= 8'd0;
             prev_key_modifiers <= 8'd0;
@@ -270,7 +273,7 @@ module usb_keyboard_interface(
             decoder_state <= WAIT;
             sent_keycode <= 1'b1;
             first_run <= 1'b1;
-        end else begin
+        end else if (usbclk_en) begin
             if (kbd_state == KBD_RESET || kbd_reset_sequence != 2'd0) begin
                 // If we end up here, we need to reset the keyboard interface
                 if (kbd_reset_sequence == 2'd0) begin
@@ -470,13 +473,13 @@ module usb_keyboard_interface(
         end
     end
 
-    always_ff @(posedge usbclk, negedge usbrst) begin
+    always_ff @(posedge clk_sys, negedge usbrst) begin
         if (!usbrst) begin
             kbd_state <= KBD_RESET;
             KBD_out <= 1'b1; // Release KBD_out
             kbd_in_pulse_counter <= 26'd0;
             kbd_bit_timer <= 10'd0;
-        end else begin
+        end else if (usbclk_en) begin
             case (kbd_state)
                 IDLE: begin
                     KBD_out <= 1'b1; // Release KBD_out

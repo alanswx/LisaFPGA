@@ -36,7 +36,8 @@ module mem_board_2mb(
     input logic [1:0] RAM_SEL,
 
     // The 20-ish MHz dot clock
-    input logic DOTCK,
+    input logic clk_sys,
+    input logic dotck_en,
     // Upper and lower data strobes
     input wire _UDS,
     input wire _LDS,
@@ -97,9 +98,11 @@ module mem_board_2mb(
 
     // Latch the RAM address whenever CAS goes low
     // The original logic continually latches it until CAS goes low and then stops, so that's what we do too
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         if (_CAS) begin
             buffered_RA <= RA;
+        end
         end
     end
 
@@ -114,9 +117,11 @@ module mem_board_2mb(
             LBDSL <= BDSL;
         end
     end*/
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         if (!_RAS) begin
             LBDSL <= BDSL;
+        end
         end
     end
 
@@ -136,10 +141,12 @@ module mem_board_2mb(
             latched_parity_upper <= POU;
         end
     end*/
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         if (RAS) begin
             latched_parity_lower <= POL;
             latched_parity_upper <= POU;
+        end
         end
     end
 
@@ -185,7 +192,8 @@ module mem_board_2mb(
     end*/
     logic LBDSL_readop_prev;
     logic _CAS_prev;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         if (!LBDSL_readop && LBDSL_readop_prev) begin
             invalid_parity_latched <= 1'b0;
         end else if (_CAS && !_CAS_prev) begin
@@ -195,6 +203,7 @@ module mem_board_2mb(
         // Latch the previous values of LBDSL and _CAS for the edge detections above
         LBDSL_readop_prev <= LBDSL_readop;
         _CAS_prev <= _CAS;
+        end
     end
 
     // All of that parity logic is for a board that has real parity RAM, which we don't have
@@ -206,7 +215,8 @@ module mem_board_2mb(
     logic [20:1] latched_bad_parity_address;
     logic force_bad_parity;
     logic HDER_force_bad_parity;
-    always_ff @(posedge DOTCK) begin
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
         if (!_CAS_sdram && !_RAS_sdram && !MREAD) begin
             // We'll end up here whenever a write happens; now check if HDER_in is asserted
             if (!_HDER_in) begin
@@ -230,6 +240,7 @@ module mem_board_2mb(
                 // And if there's no match, then send good parity
                 HDER_force_bad_parity <= 1'b0;
             end
+        end
         end
     end
 
@@ -286,7 +297,7 @@ module mem_board_2mb(
 
     // Now make the SDRAM controller instance
     SDRAM_Controller_Flat SDRAM_2MB(
-        .clk(DOTCK),
+        .clk(clk_sys),
         .A(buffered_RA),
         .A16(A16),
         .A17(A17),

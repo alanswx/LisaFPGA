@@ -143,7 +143,8 @@ module top(
         input logic [1:0] SPEED_SEL,
         input logic CPU_ROM_SEL,
         input logic IO_ROM_SEL,
-        output logic usbclk
+        output logic usbclk_en, // ~12MHz usbclk clock-enable (usb runs on clk_sys now)
+        input logic clk_sys   // 81.50016 MHz master clock; all Lisa clocks are divided from this
     );
 
     // This is the board ID for the LisaFPGA identity register; software can read it to see if it's on a real Lisa or an FPGA
@@ -249,145 +250,92 @@ module top(
     assign _INT1 = 1'b1;
     assign _INT2 = 1'b1;
 
-    logic DOTCK;
     logic sysclk_ibuf;
 
     assign sysclk_ibuf = sysclk;
 
+    // Level signals that used to be their own clocks are now clk_sys-domain
+    // registers/strobes generated in the clock section below:
+    //   COPCK          - the 1.95MHz COP clock LEVEL (still a level; the COP model
+    //                    takes clk_sys + copck2x_en and derives its own enable)
+    //   SCCCK_ungated  - the 3.6864MHz SCC clock LEVEL (used to form sccck_en)
+    // All the old derived clock nets (DOTCK/C16M/C5M/SCCCK/*_2x/*_ungated clocks)
+    // are gone; consumers use clk_sys + the matching enable strobe instead.
     logic COPCK;
     logic SCCCK_ungated;
-    logic SCCCK;
-
-    // We need to generate the 20.37504MHz DOTCK from the 125MHz sysclk
-    // And the 3.9MHz COPCK, 3.68MHz SCCCK, and 16MHz C16M too
-    logic C16M_ungated;
-    logic C16M;
-    logic COPCK_2x;
-    logic SCCCK_2x;
-    logic C5M_ungated;
-    logic C5M;
-    // This is the main Lisa dot clock before we gate it with the power switch; it can be anywhere from 20MHz to 75MHz
-    logic DOTCK_ungated;
-    // And here's a 12MHz clock for USB
-    // (usbclk is declared as an output port of module top)
 
     // We use an MMCM for this, but there's a catch
     // It can't generate either COPCK or SCCCK directly because the frequencies are too low
     // So instead, we generate 2x the frequency of each and divide it by 2 with flip-flops
     // We'll use this MMCM to generate everything but the DOTCK
+    // ---------------------------------------------------------------------
+    // Single-clock enable generator. The whole core runs on clk_sys; each old
+    // derived clock is now a one-clk_sys-cycle enable strobe pulsing when that
+    // clock used to have a rising edge. The DOTCK speed-select mux is folded
+    // into the generator (speed_sel picks the dotck_en divide ratio).
+    // ---------------------------------------------------------------------
+    wire dotck_en_raw, c16m_en_raw, c5m_en_raw, copck2x_en, sccck2x_en;
+    // usbclk_en is a module output port (declared in the port list)
+
     clock_divider primary_clock_divider (
-        .sysclk(sysclk_ibuf),
-        //.lisa_dotck(lisa_dotck_ungated), // dotck_20M
-        .C16M(C16M_ungated),
-        .COPCK_2x(COPCK_2x),
-        .SCCCK_2x(SCCCK_2x),
-        .C5M(C5M_ungated),
-        .usbclk(usbclk)
+        .clk_sys(clk_sys),
+        .speed_sel(SPEED_SEL),
+        .dotck_en(dotck_en_raw),
+        .c16m_en(c16m_en_raw),
+        .c5m_en(c5m_en_raw),
+        .copck2x_en(copck2x_en),
+        .sccck2x_en(sccck2x_en),
+        .usbclk_en(usbclk_en)
     );
 
-    // The DOTCK is a little bit different because we need to be able to select between multiple frequencies for it
-    // So we generate all of the possible DOTCK frequencies with a separate MMCM, and then use clock muxing to pick which one we want
-    logic dotck_20M;
-    logic dotck_40M;
-    logic dotck_60M;
-    logic dotck_80M;
-
-    // This second MMCM generates all of the dotck frequencies we can select from
-    dotck_mmcm dotck_generator (
-        .sysclk(sysclk_ibuf),
-        .dotck_20M(dotck_20M),
-        .dotck_40M(dotck_40M),
-        .dotck_60M(dotck_60M),
-        .dotck_80M(dotck_80M)
-    );
-
-    // Now we need to read the speed select inputs and pick which dot clock to use
-    // We have to use special BUFGMUX primitives that are designed for clock muxing; clocks can't be safely routed through regular muxes
-    // Each BUFGMUX can only select between two clocks, so we have to do it in multiple stages
-    // One for 20 or 40M, one for 60 or 80M, and one for selecting between the two groups
-
-    logic dotck_A, dotck_B;
-
-    // SPEED_SEL is in an unknown clock domain, so let's bring it into the dotck_20M domain before feeding it into the muxes
-    // This should help to get rid of any noise from flipping the switches too
-    logic [1:0] SPEED_SEL_dotck;
-    always_ff @(posedge dotck_20M) begin
-        SPEED_SEL_dotck <= SPEED_SEL;
-    end
-
-    // Behavioral clock multiplexing
-    assign dotck_A = SPEED_SEL_dotck[0] ? dotck_20M : dotck_40M;
-    assign dotck_B = SPEED_SEL_dotck[0] ? dotck_60M : dotck_80M;
-    assign DOTCK_ungated = SPEED_SEL_dotck[1] ? dotck_A : dotck_B;
-
-    // Here's that division by 2
-    always_ff @(posedge COPCK_2x) begin
-        // In simulation, we need to give COPCK a defined state on reset
-        `ifdef SIMULATION
-            if (!_RSTSW) begin
-                COPCK <= 1'b0;
-            end else begin
+    // COPCK level (COPCK_2x divided by 2), advanced only on COPCK_2x ticks
+    always_ff @(posedge clk_sys) begin
+        if (copck2x_en) begin
+            `ifdef SIMULATION
+                if (!_RSTSW) COPCK <= 1'b0;
+                else         COPCK <= ~COPCK;
+            `else
                 COPCK <= ~COPCK;
-            end
-        // But in real life, we don't want to do this; the COP should run at all times when powered on
-        // And we just use whatever random state it happens to be in on power-up
-        `else
-            COPCK <= ~COPCK;
-        `endif
+            `endif
+        end
     end
 
-    // We need to do something similar for the SCCCK, but we also need to synchronize the reset signal into its clock domain before feeding it in
+    // SCCCK level (SCCCK_2x divided by 2) with its reset synchronized in.
     (* ASYNC_REG = "TRUE" *) logic _RESET_SCCCK_int, _RESET_SCCCK_sync;
-    always_ff @(posedge SCCCK_2x) begin
-        _RESET_SCCCK_int <= _RESET;
-        _RESET_SCCCK_sync <= _RESET_SCCCK_int;
-    end
-    // And now do the actual division by 2, using the synchronized reset signal
-    always_ff @(posedge SCCCK_2x, negedge _RESET_SCCCK_sync) begin
-        if (!_RESET_SCCCK_sync) begin
-            SCCCK_ungated <= 1'b0;
-        end else begin
-            SCCCK_ungated <= ~SCCCK_ungated;
+    always_ff @(posedge clk_sys) begin
+        if (sccck2x_en) begin
+            _RESET_SCCCK_int  <= _RESET;
+            _RESET_SCCCK_sync <= _RESET_SCCCK_int;
         end
+    end
+    always_ff @(posedge clk_sys, negedge _RESET_SCCCK_sync) begin
+        if (!_RESET_SCCCK_sync) SCCCK_ungated <= 1'b0;
+        else if (sccck2x_en)    SCCCK_ungated <= ~SCCCK_ungated;
+    end
+    // SCCCK rising-edge enable (3.6864MHz strobe) for the SCC serial domain.
+    wire sccck_en_raw = sccck2x_en & ~SCCCK_ungated;
+
+    // ON-gate the core enables: the Lisa freezes when powered off, exactly like
+    // the old design gated the derived clocks. One ON synchronizer suffices now
+    // that everything is in the clk_sys domain. copck2x_en / usbclk_en stay
+    // ungated (the COP and USB logic run whenever the FPGA is powered).
+    (* ASYNC_REG = "TRUE" *) logic ON_int, ON_sync;
+    always_ff @(posedge clk_sys) begin
+        ON_int  <= ON;
+        ON_sync <= ON_int;
     end
 
     `ifdef SIMULATION
-        // In simulation, we want the Lisa to always be on, so we don't gate the clocks
-        assign DOTCK = DOTCK_ungated;
-        assign C16M = C16M_ungated;
-        assign SCCCK = SCCCK_ungated;
-        assign C5M = C5M_ungated;
+        // In simulation the Lisa is always on, so the enables are never gated.
+        wire dotck_en = dotck_en_raw;
+        wire c16m_en  = c16m_en_raw;
+        wire c5m_en   = c5m_en_raw;
+        wire sccck_en = sccck_en_raw;
     `else
-        // In real life, we gate the clocks based on the ON signal
-        // Use BUFGCE primitives for this; clocks shouldn't be routed through regular muxes
-        // We also need to synchronize the ON signal to each clock domain before feeding it into each BUFGCE
-        (* ASYNC_REG = "TRUE" *) logic ON_int_dotck, ON_int_c16m, ON_int_sccck, ON_int_c5m;
-        (* ASYNC_REG = "TRUE" *) logic ON_sync_dotck, ON_sync_c16m, ON_sync_sccck, ON_sync_c5m;
-        always_ff @(posedge DOTCK_ungated) begin
-            ON_int_dotck <= ON;
-            ON_sync_dotck <= ON_int_dotck;
-        end
-        always_ff @(posedge C16M_ungated) begin
-            ON_int_c16m <= ON;
-            ON_sync_c16m <= ON_int_c16m;
-        end
-        always_ff @(posedge SCCCK_ungated) begin
-            ON_int_sccck <= ON;
-            ON_sync_sccck <= ON_int_sccck;
-        end
-        always_ff @(posedge C5M_ungated) begin
-            ON_int_c5m <= ON;
-            ON_sync_c5m <= ON_int_c5m;
-        end
-        assign DOTCK = DOTCK_ungated & ON_sync_dotck;
-        assign C16M = C16M_ungated & ON_sync_c16m;
-        assign SCCCK = SCCCK_ungated & ON_sync_sccck;
-        assign C5M = C5M_ungated & ON_sync_c5m;
-        // This was the old and dumb way of doing things; it's a good thing I stopped doing it like this
-        //assign lisa_dotck = (ON) ? lisa_dotck_ungated : 1'b0;
-        //assign C16M = (ON) ? C16M_ungated : 1'b0;
-        //assign SCCCK = (ON) ? SCCCK_ungated : 1'b0;
-        //assign C5M = (ON) ? C5M_ungated : 1'b0;
+        wire dotck_en = dotck_en_raw & ON_sync;
+        wire c16m_en  = c16m_en_raw  & ON_sync;
+        wire c5m_en   = c5m_en_raw   & ON_sync;
+        wire sccck_en = sccck_en_raw & ON_sync;
     `endif
 
     logic _RSTSW_int;
@@ -398,9 +346,11 @@ module top(
     logic ON_prev;
     logic ON_rising;
 
-    always_ff @(posedge COPCK_2x) begin
-        ON_prev <= ON;
-        _RSTSW_int <= _RSTSW & ~(ON & ~ON_prev); // Detect the rising edge of ON and use that plus the reset switch to reset the system
+    always_ff @(posedge clk_sys) begin
+        if (copck2x_en) begin
+            ON_prev <= ON;
+            _RSTSW_int <= _RSTSW & ~(ON & ~ON_prev); // Detect the rising edge of ON and use that plus the reset switch to reset the system
+        end
     end
 
     // We also need to do some stuff with the _PWRSW signal to address a bug in the original Lisa system
@@ -410,19 +360,22 @@ module top(
 
     // First, synchronize the _PWRSW signal to the COPCK domain
     (* ASYNC_REG = "TRUE" *) logic _PWRSW_int, _PWRSW_sync;
-    always_ff @(posedge COPCK_2x) begin
-        _PWRSW_int <= _PWRSW;
-        _PWRSW_sync <= _PWRSW_int;
+    always_ff @(posedge clk_sys) begin
+        if (copck2x_en) begin
+            _PWRSW_int <= _PWRSW;
+            _PWRSW_sync <= _PWRSW_int;
+        end
     end
     // Now detect the falling edge of the synchronized version of _PWRSW
     logic _PWRSW_sync_prev;
-    always_ff @(posedge COPCK_2x) begin
-        _PWRSW_sync_prev <= _PWRSW_sync;
+    always_ff @(posedge clk_sys) begin
+        if (copck2x_en) _PWRSW_sync_prev <= _PWRSW_sync;
     end
     // And now generate a pulse whenever we see a falling edge on _PWRSW_sync
     logic _PWRSW_falling;
     logic [15:0] _PWRSW_pulse_counter; // We want the pulse to last a little more than just 1 clock, so make a counter to allow this
-    always_ff @(posedge COPCK_2x) begin
+    always_ff @(posedge clk_sys) begin
+        if (copck2x_en) begin
         if (_PWRSW_sync_prev && !_PWRSW_sync) begin
             _PWRSW_falling <= 1'b0; // If we see a falling edge, start the pulse
             _PWRSW_pulse_counter <= 16'h0; // Reset the counter at the start of the pulse just in case it's not already reset
@@ -437,13 +390,16 @@ module top(
             _PWRSW_pulse_counter <= 16'h0; //If we're not in a pulse, make sure the counter is reset
             _PWRSW_falling <= 1'b1; // And make sure the falling signal is deasserted
         end
+        end
     end
 
-    // We need a version of _RSTSW_int synchronized into the DOTCK domain for the CPU board, so do that now
+    // We need a version of _RSTSW_int synchronized into the "DOTCK" (dotck_en) pace for the CPU board
     (* ASYNC_REG = "TRUE" *) logic _RSTSW_dotck_int, _RSTSW_dotck;
-    always_ff @(posedge DOTCK_ungated) begin
-        _RSTSW_dotck_int <= _RSTSW_int;
-        _RSTSW_dotck <= _RSTSW_dotck_int;
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
+            _RSTSW_dotck_int <= _RSTSW_int;
+            _RSTSW_dotck <= _RSTSW_dotck_int;
+        end
     end
 
     // Note the inversion of _VSYNC and VID here; the LS132 on the motherboard does this
@@ -460,7 +416,8 @@ module top(
     HDMI_Interface lisa_hdmi_output(
         .sysclk(sysclk_ibuf),
         ._reset(_RESET),
-        .DOTCK(DOTCK),
+        .DOTCK(clk_sys), // HDMI_Interface is stubbed on MiSTer; DOTCK input is ignored
+
         .framerate_sel(FRAMERATE_SEL), // 0 for 1080p30, 1 for 1080p60
         .VA_overflow(VA_overflow), // Replaces VSYNC; better reflects the VSYNC time which is actually longer than _VSYNC
         ._clr_vid_clk(_clr_vid_clk), // Replaces _HSYNC; better reflects the HSYNC time which is actually shorter than _HSYNC
@@ -532,7 +489,8 @@ module top(
         .A17(A17),
         .A18(A18),
         .A19(A19),
-        .DOTCK(DOTCK),
+        .clk_sys(clk_sys),
+        .dotck_en(dotck_en),
         .MREAD(MREAD),
         ._CAS(_CAS),
         ._RAS(_RAS),
@@ -678,7 +636,8 @@ module top(
     logic PWM;
 
     Lite_Adapter lisa_lite (
-        .clk(C5M),
+        .clk(clk_sys),
+        .c5m_en(c5m_en),
         .rst(~_RSTSW_int),
         .PH0(PH[0]),
         .MT(MT1),
@@ -763,9 +722,11 @@ module top(
     // The regular reset signal is generated in the DOTCK domain, but we need it in the usbclk domain
     // So we'll create a synchronized version of it here
     (* ASYNC_REG = "TRUE" *) logic usbrst_int, usbrst;
-    always_ff @(posedge usbclk) begin
-        usbrst_int <= _RESET;
-        usbrst <= usbrst_int;
+    always_ff @(posedge clk_sys) begin
+        if (usbclk_en) begin
+            usbrst_int <= _RESET;
+            usbrst <= usbrst_int;
+        end
     end
 
     // We also need IOBUFs for the USB data lines since they're bidirectional
@@ -791,7 +752,7 @@ module top(
     // Instantiate the USB HID host module for the first USB port (port 0, previously hard-coded to be for the mouse)
     `ifndef SIMULATION
         usb_hid_host usb_port0 (
-            .usbclk(usbclk), // 12MHz clock
+            .usbclk(clk_sys), // stubbed usb_hid_host ignores this clock
             .usbrst_n(usbrst), // Active-low reset
             .usb_dm(usb_dm_out_port0), // USB I/O
             .usb_dp(usb_dp_out_port0),
@@ -832,7 +793,7 @@ module top(
     // Instantiate the USB HID host module for the second USB port (port 1, previously hard-coded to be for the keyboard)
     `ifndef SIMULATION
         usb_hid_host usb_port1 (
-            .usbclk(usbclk), // 12MHz clock
+            .usbclk(clk_sys), // stubbed usb_hid_host ignores this clock
             .usbrst_n(usbrst), // Active-low reset
             .usb_dm(usb_dm_out_port1), // USB I/O
             .usb_dp(usb_dp_out_port1),
@@ -903,7 +864,8 @@ module top(
     // Finally, instantiate the USB mouse interface module, routing in the appropriate signals
     `ifndef SIMULATION
         usb_mouse_interface usb_mouse_interface (
-            .usbclk(usbclk),
+            .clk_sys(clk_sys),
+            .usbclk_en(usbclk_en),
             .usbrst(usbrst),
             .mouse_dx_in(mouse_dx_selected),
             .mouse_dy_in(mouse_dy_selected),
@@ -913,7 +875,8 @@ module top(
         );
         // And now the USB keyboard one
         usb_keyboard_interface usb_kbd_interface (
-            .usbclk(usbclk),
+            .clk_sys(clk_sys),
+            .usbclk_en(usbclk_en),
             .usbrst(usbrst),
             .key_modifiers_in(key_modifiers_selected),
             .key1_in(key1_selected),
@@ -1123,13 +1086,14 @@ module top(
         .ON(ON),
 
         .sysclk(sysclk_ibuf),
-        .C16M(C16M),
-        .COPCK_2x(COPCK_2x),
+        .c16m_en(c16m_en),
+        .copck2x_en(copck2x_en),
         .COPCK(COPCK),
-        .SCCCK(SCCCK),
+        .sccck_en(sccck_en),
         .E_pos_phase(E_pos_phase),
         .E_neg_phase(E_neg_phase),
-        .DOTCK(DOTCK),
+        .clk_sys(clk_sys),
+        .dotck_en(dotck_en),
         .VC(VC),
         .IO_ROM_SEL(IO_ROM_SEL),
         .spoof_88(GPIO[0])
@@ -1155,7 +1119,8 @@ module top(
             .A20(A20),
             .VA9(VA9B),
             .VA10(VA10B),
-            .DOTCK(DOTCK),
+            .clk_sys(clk_sys),
+        .dotck_en(dotck_en),
             ._UDS(_UDS),
             ._LDS(_LDS),
             ._CAS(_CAS),
@@ -1198,7 +1163,8 @@ module top(
             .A19(A19),
             .A20(A20),
             .RAM_SEL(RAM_SEL),
-            .DOTCK(DOTCK),
+            .clk_sys(clk_sys),
+        .dotck_en(dotck_en),
             ._UDS(_UDS),
             ._LDS(_LDS),
             ._CAS(_CAS),
