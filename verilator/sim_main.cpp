@@ -32,7 +32,7 @@
 #include "sim/m68k_dasm.h"
 #include "Vemu___024root.h"
 
-bool cpu_trace_enable = true;
+bool cpu_trace_enable = false;
 int trace_console_cnt = 0;
 
 #define FMT_HEADER_ONLY
@@ -57,17 +57,22 @@ enum class RunState {Stopped, Running, SingleClock, MultiClock, StepIn, NextIRQ}
 struct SimOptions {
 	bool headless = false;
 	uint64_t cycles = 0;
+	uint64_t status_interval = 5000000;
+	bool trace = false;
 	std::string profile_image = "profile.image";
 };
 
 static void PrintUsage(const char* argv0) {
 	fprintf(stderr,
-		"Usage: %s [--profile <image>] [--headless] [--cycles <count>] [--help]\n"
+		"Usage: %s [--profile <image>] [--headless] [--cycles <count>] [--trace] [--help]\n"
 		"\n"
 		"  --profile <image>  ProFile disk image to mount (default: profile.image)\n"
 		"                     Aliases: --profile-image, --proimage\n"
 		"  --headless         Run without SDL/ImGui windows\n"
-		"  --cycles <count>   Headless cycles to run; 0 runs until interrupted (default: 0)\n",
+		"  --cycles <count>   Headless cycles to run; 0 runs until interrupted (default: 0)\n"
+		"  --trace            Enable 68k instruction trace output\n"
+		"  --status-interval <count>\n"
+		"                     Headless status interval in cycles; 0 disables (default: 5000000)\n",
 		argv0);
 }
 
@@ -79,6 +84,8 @@ static bool ParseOptions(int argc, char** argv, SimOptions* options) {
 			exit(0);
 		} else if (arg == "--headless") {
 			options->headless = true;
+		} else if (arg == "--trace") {
+			options->trace = true;
 		} else if (arg == "--profile" || arg == "--profile-image" || arg == "--proimage") {
 			if (++i >= argc) {
 				fprintf(stderr, "%s requires an image path\n", arg.c_str());
@@ -99,6 +106,14 @@ static bool ParseOptions(int argc, char** argv, SimOptions* options) {
 			options->cycles = strtoull(argv[i], NULL, 0);
 		} else if (arg.rfind("--cycles=", 0) == 0) {
 			options->cycles = strtoull(arg.substr(9).c_str(), NULL, 0);
+		} else if (arg == "--status-interval") {
+			if (++i >= argc) {
+				fprintf(stderr, "--status-interval requires a count\n");
+				return false;
+			}
+			options->status_interval = strtoull(argv[i], NULL, 0);
+		} else if (arg.rfind("--status-interval=", 0) == 0) {
+			options->status_interval = strtoull(arg.substr(18).c_str(), NULL, 0);
 		} else {
 			fprintf(stderr, "Unknown option: %s\n", arg.c_str());
 			PrintUsage(argv[0]);
@@ -132,6 +147,7 @@ bool pc_break_enabled;
 bool break_pending = false;
 bool old_vpb = false;
 bool headless_mode = false;
+uint64_t headless_status_interval = 5000000;
 
 // HPS emulator
 // ------------
@@ -844,6 +860,46 @@ void DumpInstruction() {
 
 static int last_cpu_addr=-1;
 static int already_saw_this = 0;
+
+static uint32_t GetCpuPc()
+{
+	return ((uint32_t)VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__PcH << 16) |
+	       VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__PcL;
+}
+
+static void PrintHeadlessStatus()
+{
+	fprintf(stderr,
+		"main_time=%llu pc=%06X ON=%d reset=%d pwrsw_n=%d "
+		"RESETn=%d BERRn=%d BUSTn=%d HDERn=%d SFERn=%d CDACKn=%d "
+		"RSTSWint=%d ONprev=%d "
+		"SPIO=%d IOCY=%d MMUIO=%d CPUC1=%d MCY=%d UA=%06X "
+		"sd_rd=%03x sd_wr=%03x lba0=%u mounted=%03x\n",
+		(unsigned long long)main_time,
+		GetCpuPc(),
+		top->ON,
+		top->reset,
+		top->pwrsw_n_out,
+		VERTOPINTERN->emu__DOT__core__DOT___RESET,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___BERR,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___BUST,
+		VERTOPINTERN->emu__DOT__core__DOT___HDER,
+		VERTOPINTERN->emu__DOT__core__DOT___SFER,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___CDACK,
+		VERTOPINTERN->emu__DOT__core__DOT___RSTSW_int,
+		VERTOPINTERN->emu__DOT__core__DOT__ON_prev,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___SPIO,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___IOCY,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___MMUIO,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__CPUC1,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__MCY,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__UA,
+		top->sd_rd,
+		top->sd_wr,
+		top->sd_lba[0],
+		top->img_mounted);
+}
+
 int verilate() {
 
 	if (!Verilated::gotFinish()) {
@@ -888,8 +944,7 @@ int verilate() {
 			// Disassembly output
 			if (cpu_trace_enable) {
 				static uint32_t last_pc = 0xFFFFFFFF;
-				uint32_t pc = ((uint32_t)top->rootp->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__PcH << 16) | 
-				              top->rootp->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__PcL;
+				uint32_t pc = GetCpuPc();
 				if (pc != last_pc) {
 					last_pc = pc;
 					uint16_t opcode = top->rootp->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__Ir;
@@ -937,9 +992,12 @@ int verilate() {
 
 			// IWM EMULATION HERE (disabled for Lisa)
 
-			if (main_time % 5000000 == 0) {
-				fprintf(stderr, "main_time: %lld, ON: %d, reset: %d, frame: %d, pwrsw_n: %d\n", 
-					(long long)main_time, top->ON, top->reset, headless_mode ? 0 : video.count_frame, top->pwrsw_n_out);
+			if (headless_mode && headless_status_interval != 0 && (main_time % headless_status_interval == 0)) {
+				PrintHeadlessStatus();
+				fflush(stderr);
+			} else if (!headless_mode && main_time % 5000000 == 0) {
+				fprintf(stderr, "main_time: %lld, ON: %d, reset: %d, frame: %d, pwrsw_n: %d\n",
+					(long long)main_time, top->ON, top->reset, video.count_frame, top->pwrsw_n_out);
 				fflush(stderr);
 			}
 
@@ -1004,6 +1062,8 @@ int main(int argc, char** argv, char** env) {
 		return 1;
 	}
 	headless_mode = options.headless;
+	headless_status_interval = options.status_interval;
+	cpu_trace_enable = options.trace;
 
 	// Create core and initialise
 	top = new Vemu();

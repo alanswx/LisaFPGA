@@ -338,11 +338,7 @@ module top(
     // that everything is in the clk_sys domain. copck2x_en / usbclk_en stay
     // ungated (the COP and USB logic run whenever the FPGA is powered).
     wire ON_val;
-    `ifdef SIMULATION
-        assign ON_val = 1'b1;
-    `else
-        assign ON_val = ON;
-    `endif
+    assign ON_val = ON;
 
     (* ASYNC_REG = "TRUE" *) logic ON_int, ON_sync;
     always_ff @(posedge clk_sys) begin
@@ -350,20 +346,12 @@ module top(
         ON_sync <= ON_int;
     end
 
-    `ifdef SIMULATION
-        // In simulation the Lisa is always on, so the enables are never gated.
-        wire dotck_en = dotck_en_raw;
-        wire c16m_en  = c16m_en_raw;
-        wire c5m_en   = c5m_en_raw;
-        wire sccck_en = sccck_en_raw;
-    `else
-        // DEBUG (bring-up): dbg_force_on can bypass the ON gate over JTAG.
-        wire on_eff = ON_sync | dbg_force_on;
-        wire dotck_en = dotck_en_raw & on_eff;
-        wire c16m_en  = c16m_en_raw  & on_eff;
-        wire c5m_en   = c5m_en_raw   & on_eff;
-        wire sccck_en = sccck_en_raw & on_eff;
-    `endif
+    // DEBUG (bring-up): dbg_force_on can bypass the ON gate over JTAG.
+    wire on_eff = ON_sync | dbg_force_on;
+    wire dotck_en = dotck_en_raw & on_eff;
+    wire c16m_en  = c16m_en_raw  & on_eff;
+    wire c5m_en   = c5m_en_raw   & on_eff;
+    wire sccck_en = sccck_en_raw & on_eff;
 
     `ifndef SIMULATION
     debug_issp u_debug_issp (
@@ -430,6 +418,11 @@ module top(
     // And now generate a pulse whenever we see a falling edge on _PWRSW_sync
     logic _PWRSW_falling;
     logic [15:0] _PWRSW_pulse_counter; // We want the pulse to last a little more than just 1 clock, so make a counter to allow this
+    `ifdef SIMULATION
+        localparam [15:0] PWRSW_PULSE_MAX = 16'd1024;
+    `else
+        localparam [15:0] PWRSW_PULSE_MAX = 16'hFFFF;
+    `endif
     always_ff @(posedge clk_sys) begin
         if (copck2x_en) begin
         if (_PWRSW_sync_prev && !_PWRSW_sync) begin
@@ -437,7 +430,7 @@ module top(
             _PWRSW_pulse_counter <= 16'h0; // Reset the counter at the start of the pulse just in case it's not already reset
         end else if (!_PWRSW_falling) begin
             // We end up here if we're in the middle of a pulse
-            if (_PWRSW_pulse_counter == 16'hFFFF) begin
+            if (_PWRSW_pulse_counter == PWRSW_PULSE_MAX) begin
                 _PWRSW_falling <= 1'b1; // If a (rather arbitrary) FFFF clock cycles have passed, end the pulse
             end else begin
                 _PWRSW_pulse_counter <= _PWRSW_pulse_counter + 1; // Otherwise, increment the counter and keep going

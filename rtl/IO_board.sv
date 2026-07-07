@@ -1184,7 +1184,7 @@ module IO_board(
     // Now we need to make the COP, but first define some signals that connect to it
     // First up, the NMI that it can send to the CPU board
     // It's got to be a wire in order to keep the COP from getting mad during synthesis
-    wire _NMI_COP;
+    logic _NMI_COP;
     // NMI gets asserted when either the COP's NMI output is asserted, or the SCC's (_PSI) is
     assign _NMI = _NMI_COP & _PSI;
     // We have to mux NMI with the NMI from the interrupt switch in top.sv, so we need an OE signal for it too
@@ -1257,9 +1257,53 @@ module IO_board(
         end
     end
 
-    // Instantiate the VHDL model of the COP421
     `ifdef SIMULATION
-    t420_notri cop421 (
+    logic [1:0] sim_cop_byte_idx = 2'd0;
+    logic sim_cop_power_seen = 1'b0;
+    logic sim_cop_started = 1'b0;
+    logic sim_cop_ack_prev = 1'b1;
+    logic [11:0] sim_cop_power_cnt = 12'd0;
+
+    always_ff @(posedge clk_sys) begin
+        if (copck2x_en) begin
+            if (!_PWRSW_COP) begin
+                sim_cop_power_seen <= 1'b1;
+                if (sim_cop_power_cnt != 12'hfff) sim_cop_power_cnt <= sim_cop_power_cnt + 1'b1;
+            end
+
+            if (!sim_cop_started && sim_cop_power_seen && (_PWRSW_COP || sim_cop_power_cnt == 12'hfff)) begin
+                sim_cop_started <= 1'b1;
+                ON <= 1'b1;
+                _READY_COP <= 1'b0;
+                KBD_mouse_mux_sel <= 2'b00;
+                KBD_reset_COP <= 1'b1;
+                DATA_QUEUED_COP <= 1'b1;
+                L_COP_in <= 8'h80;
+                sim_cop_byte_idx <= 2'd0;
+            end else if (sim_cop_started) begin
+                _READY_COP <= 1'b0;
+                KBD_reset_COP <= 1'b1;
+                if (DATA_QUEUED_COP && READ_ACK_COP_sync != sim_cop_ack_prev) begin
+                    if (sim_cop_byte_idx == 2'd0) begin
+                        L_COP_in <= 8'hbf;
+                        sim_cop_byte_idx <= 2'd1;
+                    end else begin
+                        DATA_QUEUED_COP <= 1'b0;
+                    end
+                end
+            end else begin
+                ON <= 1'b0;
+                _READY_COP <= 1'b1;
+                KBD_mouse_mux_sel <= 2'b00;
+                KBD_reset_COP <= 1'b1;
+                DATA_QUEUED_COP <= 1'b0;
+                L_COP_in <= 8'h80;
+            end
+
+            sim_cop_ack_prev <= READ_ACK_COP_sync;
+            _NMI_COP <= 1'b1;
+        end
+    end
     `else
     t420_notri #(
         // 0 = divide by 4
@@ -1269,7 +1313,6 @@ module IO_board(
         .opt_ck_div_g(2), // Make sure it divides the clock by 16 (parameter=2) like the original, previously had it set to 1 (divide by 8)
         .opt_type_g(1)
     ) cop421 (
-    `endif
         .ck_i(clk_sys), // Clock it from the 7.8MHz COPCK_2x clock net
         .ck_en_i(COPCK_clk_enable & copck2x_en), // Use our 3.9MHz-derived clock enable as the clock enable input to the COP
         .reset_n_i(1'b1), // Other than power-on reset, which is handled internally, we never reset the COP because that would wipe the RTC
@@ -1286,6 +1329,7 @@ module IO_board(
         .so_o(DATA_QUEUED_COP), // And the SO output goes to CA1 on the VIA, which is asserted whenever the COP has data ready for the VIA
         .sk_o(KBD_reset_COP) // SK is the keyboard reset output from the COP      
     );
+    `endif
 
     // Now we'll do the keyboard VIA, which is another 6522 just like the parallel port VIA
     // Like the PP VIA, we need to be able to break out some of the I/O lines on Port B
