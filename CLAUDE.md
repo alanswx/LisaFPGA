@@ -62,6 +62,14 @@ nohup /home/alans/intelFPGA_lite/quartus/bin/quartus_sh --flow compile Lisa \
 # ALWAYS run from the repo root (/home/alans/mister/LisaFPGA). Running from another
 # cwd gives "Top-level design entity Lisa is undefined". If you get a stale
 # "entity undefined", `rm -rf db incremental_db` and rebuild.
+#
+# ROUTING CAPACITY: the design is ~90% ALMs with the debug probes. Adding a probe
+# can make it fail to ROUTE (not place) — and the fitter may thrash for HOURS
+# before giving up. If you need a new probe, FOLD it into an existing probe's
+# spare bits rather than adding a new altsource_probe instance, and/or drop a
+# probe you no longer need. Lisa.qsf has FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION
+# ALWAYS to help. Do a quick `quartus_map` syntax check (~2 min) before committing
+# to a full compile.
 
 # Deploy + launch on the DE10-Nano (192.168.1.196, SSH root/1):
 sshpass -p 1 scp -o StrictHostKeyChecking=no output_files/Lisa.rbf \
@@ -107,6 +115,22 @@ The screenshot renders CLEAN only when video detection is correct; if timing is
 off it returns a color-noise thumbnail. The OSD "Video" info line
 (width×height) is the authoritative resolution the scaler detected.
 
+**CAVEAT:** `POST /api/screenshots` returns empty for the **LISA core** — MiSTer
+framebuffer screenshots only work from the MENU core. So you cannot autonomously
+capture the Lisa's screen; rely on the JTAG probes for ground truth (or ask the
+user for a photo). The `/api/screenshots` list is sorted oldest-first.
+
+### Autonomous keyboard injection (mrext websocket)
+
+The MiSTer Remote (mrext, port 8182) exposes a **raw websocket** at
+`ws://192.168.1.196:8182/api/ws` that injects keys by **Linux uinput code**:
+`kbd:<name>`, `kbdRaw:<code>`, `kbdRawDown:<code>`, `kbdRawUp:<code>`. Helper:
+`python3 debug/ws_send.py "kbdRawDown:56" "kbdRawDown:4" "kbdRawUp:4" "kbdRawUp:56"`.
+Codes: Alt=56, '1'=2 '2'=3 '3'=4, Enter=28, Esc=1, F12=88 (OSD). **Our adapter
+maps host Alt → the Lisa Apple/Command key** (ps2_to_usb_hid), so `Apple+3` =
+hold 56, tap 4. Injection is confirmed reaching the CPU (LCOP `so_cnt` climbs).
+mrext has **no mouse** injection — keyboard only.
+
 ## Debugging on real hardware (JTAG ISSP probes)
 
 The core is instrumented with **In-System Sources & Probes** (`altsource_probe`)
@@ -120,6 +144,7 @@ how essentially every bug this project was found. Scripts live in **debug/**:
 - `debug/set_vid.tcl <origin_src> <h_de_start>` — live video position trim +
   prints first_w. `debug/set_de_delay.tcl <h_de_start>` — h_de_start only.
 - `debug/decode_lpro.py` — decode the ProFile ("LPRO") probe.
+- `debug/ws_send.py` — mrext keyboard injection (see below).
 
 **ISSP API gotcha:** `get_insystem_source_probe_instance_info` MUST be called
 BEFORE `start_insystem_source_probe` (see the scripts).
@@ -129,12 +154,13 @@ BEFORE `start_insystem_source_probe` (see the scripts).
 | Probe | Module | Reports |
 |-------|--------|---------|
 | LDBG | debug_issp.sv | pll_locked, ON, reset, frame counters; source can force speed/on |
-| LVID / LVI2 | Lisa.sv | video raster: first_w (want 720), n_lines (364), line period, VID edges, raw _HSYNC/_clr/VA edge counts |
+| LVID | Lisa.sv | video raster: first_w (want 720), n_lines (364), first_de_pos; source = live video position trim (LVI2 was removed to free routing) |
 | LCPU | CPU_board.sv | last program-fetch PC, bus-error count, halt/reset, the HDER/SFER/NMI/IPL error chain |
-| LIO / LCOP | IO_board.sv | keyboard-VIA (VPA/VMA) access path; COP↔VIA handshake, L-bus bytes, keyboard line |
-| LKBD / LMOU | Lisa.sv | keyboard/mouse adapter line + event counters |
+| LIO | IO_board.sv | **repurposed for ProFile-enable diagnosis** (was kbd-VIA error-50): `[63:48]`pen_fall_cnt `[47:32]`cmdu_edge_cnt `[31:24]`kv_wr `[23:16]`kv_rd `[15:8]`pp_io_nz `[7]`_ProFile_EN `[6]`_CMD_ungated `[5]`_CMD `[4]`_PSTRB `[3:0]`cmd_while_en |
+| LCOP | IO_board.sv | COP↔CPU handshake; **`[63:32]` = first 4 boot keycodes kc0..kc3** (latched at DATA_QUEUED — kc0 should be 0x80 RSTCODE; a fresh boot currently shows 0x85,0x87 = the keyboard-misdecode bug), `[31:24]`so_cnt `[23:16]`kbdin_cnt |
+| LKBD / LMOU | Lisa.sv | keyboard/mouse adapter line + event counters (LKBD kbdsig_edges climbs on injection; LMOU pkt_cnt=0 ⇒ no mouse activity at boot) |
 | LRAM | Lisa.sv | SDRAM self-test (want st_rd0=A5C3, st_rd1=5A3C) |
-| LPRO | profile.sv | ProFile FSM state + furthest state, command, block#, _CMD/_PSTRB edge counts, SD read-acks, img_mounted, _PRES |
+| LPRO | profile.sv | ProFile FSM state + furthest state, command, block#, _CMD/_PSTRB edge counts, SD read-acks, img_mounted, _PRES; `[1:0]` = rst_at_cmd/pres_at_cmd (reset-source latch) |
 
 **Workflow:** reproduce the failure on hardware, read the relevant probe,
 compare against the boot ROM listing (below) to locate the exact instruction /
@@ -167,14 +193,26 @@ System Verilator is 4.204 (too old for the fx68k structs). A working Verilator
 -Wno-BLKANDNBLK`). `Date.now`-free. The fx68k VPA testbench that exonerated the
 CPU is in the session scratchpad `fxsim/`.
 
-## Status (2026-07-06)
+## Status (2026-07-07)
 
 Boots to the "STARTUP FROM" disk selector; clean stable 720×364 video (small
 left-margin residual); keyboard + mouse work; SDRAM, error-50, tri-state bugs
-fixed. **Open:** ProFile actually booting an OS (being debugged with LPRO);
-final video centering; strip debug probes for release; close timing; SCC/FPU
-enable conversion. Full detail + every root cause in
-**progress_quartus_handover.md**.
+fixed.
+
+**ProFile boot — root-caused, fix pending.** The Lisa never accesses the
+ProFile: it's stuck in the STARTUP-FROM menu, which the boot ROM reaches BEFORE
+the ProFile boot code. The menu appears because **the COP mis-decodes the
+keyboard power-up sequence** — it delivers `0x85,0x87` to the CPU instead of
+`0x80`(RSTCODE)+`0xBF`(ID) (see LCOP kc0..kc3). RSTSCAN (0xFE09F0) needs `0x80`;
+without it the leftover downstrokes reach KEYSCAN → BTMENU → menu. Ruled out:
+mouse (LMOU=0), adapter logic (sends correct 0x80/0xBF), ProFile datapath. It's
+a **keyboard↔COP serial bit-timing mis-decode** from the single-clock
+conversion. Fix = tune the keyboard/COP bit timing; **verify via LCOP kc0 →
+0x80** (then LPRO cmd_edges/max_state/rd_acks finally advance). No screen needed.
+
+**Other open:** final video centering; strip debug probes for release; close
+timing; SCC/FPU enable conversion. Full detail + every root cause in
+**progress_quartus_handover.md** (see the 2026-07-07 section).
 
 ## Conventions
 

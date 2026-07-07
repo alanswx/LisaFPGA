@@ -1,9 +1,19 @@
 # TODO — clocking refactor follow-ups (verify/fix after it runs on the FPGA)
 
-> **Hardware bring-up status:** the core now boots on the DE10-Nano, runs at 60 fps,
-> and the framework detects 720×364. Remaining issue: the picture is **black with a
-> white vertical line** (video *content*, not geometry). Full bring-up details,
-> fixes, debug-instrumentation cleanup, and next steps are in
+> **Hardware bring-up status (2026-07-07):** the core boots on the DE10-Nano at
+> 60 fps with clean, stable 720×364 video; keyboard + mouse work; SDRAM, error-50,
+> and the Vivado→Quartus tri-state bugs are fixed. The video-content bug (black
+> with a white vertical line) is **solved**.
+>
+> **Top open item — ProFile won't boot:** root-caused to the COP mis-decoding the
+> keyboard power-up sequence (delivers `0x85,0x87` instead of `0x80`(RSTCODE)+
+> `0xBF`(ID)), which pops the STARTUP-FROM menu before the ROM reaches the ProFile
+> boot code. It's a keyboard↔COP serial bit-timing mis-decode; fix by tuning that
+> timing, verify via LCOP `kc0 → 0x80`. Also open: final video centering, strip
+> debug probes for release, close timing, SCC/FPU enable conversion.
+>
+> Full bring-up details, every root cause, debug tooling (incl. mrext keyboard
+> injection), and next steps are in
 > **[progress_quartus_handover.md](progress_quartus_handover.md)**.
 
 
