@@ -502,12 +502,23 @@ module profile (
     reg [4:0] max_state = 0;
     reg [7:0] cmd_edges = 0, strb_edges = 0, rd_acks = 0;
     reg cmd_d = 1, strb_d = 1, rd_ack_d = 0;
+    // DEBUG: when a _CMD falling edge arrives while the FSM is held in reset
+    // (the failing case: the Lisa commands us while (reset || _PRES==0) is true),
+    // latch WHICH reset source was active so we know whether it's the core reset
+    // or _PRES/_CRES holding us off. cmd_in_rst counts these missed commands.
+    reg rst_at_cmd = 0, pres_at_cmd = 1;
+    reg [3:0] cmd_in_rst = 0;
     always_ff @(posedge clk) begin
         if (state > max_state) max_state <= state;
         cmd_d <= _CMD; strb_d <= _PSTRB; rd_ack_d <= (sd_rd & sd_ack);
         if (cmd_d && !_CMD)   cmd_edges  <= cmd_edges + 8'd1;
         if (strb_d && !_PSTRB) strb_edges <= strb_edges + 8'd1;
         if (!rd_ack_d && (sd_rd & sd_ack)) rd_acks <= rd_acks + 8'd1;
+        if (cmd_d && !_CMD && (reset || _PRES == 1'b0)) begin
+            rst_at_cmd  <= reset;
+            pres_at_cmd <= _PRES;
+            cmd_in_rst  <= cmd_in_rst + 4'd1;
+        end
     end
     altsource_probe #(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
@@ -516,7 +527,8 @@ module profile (
     ) u_pro_probe ( .source(), .probe({
         state, max_state, commandBuffer[0], block_num[11:0],
         cmd_edges, strb_edges, rd_acks,
-        img_mounted, _PRES, _CMD, _PSTRB, _BSY, R_W, sd_rd, sd_wr, 2'b0
+        img_mounted, _PRES, _CMD, _PSTRB, _BSY, R_W, sd_rd, sd_wr,
+        rst_at_cmd, pres_at_cmd
     }), .source_clk(clk), .source_ena(1'b1) );
 
 endmodule

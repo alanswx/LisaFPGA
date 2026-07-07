@@ -1027,6 +1027,30 @@ module IO_board(
     assign OCD_ungated = (~_ProFile_EN) ? OCD : 1'b1;
     //assign _BSY_ungated = (~_ProFile_EN) ? _BSY : 1'b1;
 
+    // DEBUG (bring-up ISSP "LPEN", remove for release): does the Lisa's parallel
+    // VIA ever ENABLE the ProFile? _CMD to the emulator is gated by _ProFile_EN
+    // (PB2). If pen_fall_cnt stays 0, the boot ROM never runs the ProFile boot/
+    // scan (the STARTUP-FROM menu blocked it) -> emulator never commanded. If
+    // pen_fall_cnt > 0 but the emulator still sees no _CMD, the gating/wiring is
+    // broken. cmdu_edge_cnt = raw VIA PB4(_CMD) toggles regardless of the gate.
+    logic [15:0] dbg_pen_fall_cnt = 0, dbg_cmdu_edge_cnt = 0;
+    logic [3:0]  dbg_cmd_while_en = 0; // _CMD_ungated falls while _ProFile_EN low
+    logic dbg_pen_d = 1, dbg_cmdu_d = 1;
+    always_ff @(posedge clk_sys) begin
+        dbg_pen_d  <= _ProFile_EN;
+        dbg_cmdu_d <= _CMD_ungated;
+        if (dbg_pen_d && !_ProFile_EN)        dbg_pen_fall_cnt  <= dbg_pen_fall_cnt + 1'd1;
+        if (dbg_cmdu_d != _CMD_ungated)       dbg_cmdu_edge_cnt <= dbg_cmdu_edge_cnt + 1'd1;
+        // Decisive: does the Lisa actually assert _CMD *while it has the ProFile
+        // enabled*? If this stays 0 the Lisa only reads status lines and aborts;
+        // if >0 but the emulator's cmd_edges doesn't climb, the gate/E-sample
+        // datapath is dropping the command.
+        if (dbg_cmdu_d && !_CMD_ungated && !_ProFile_EN)
+            dbg_cmd_while_en <= dbg_cmd_while_en + 1'd1;
+    end
+    // (No standalone probe: the design is at device capacity, so these fields are
+    // folded into the existing LIO probe instance below to avoid a new JTAG node.)
+
     // Let's also make the _IOIR (I/O interrupt) signal, which gets asserted whenever either the VIA or FDC assert their IRQs
     // On the real board, this is an open-collector wired-OR signal (the CPU board can assert it too), but we have to do it differently here
     // That's because the synthesizer doesn't support multiple drivers on a single signal if the drivers are split between modules
@@ -1329,9 +1353,14 @@ module IO_board(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
         .instance_id ("LIO"), .probe_width (64), .source_width (1),
         .source_initial_value ("0"), .enable_metastability ("NO")
+    // LIO now repurposed for ProFile-enable diagnosis (error-50 keyboard-VIA
+    // debug is solved). Layout: [63:48]=pen_fall_cnt [47:32]=cmdu_edge_cnt
+    // [31:24]=kv_wr_cnt [23:16]=kv_rd_cnt [15:8]=pp_io_nz
+    // [7]=_ProFile_EN [6]=_CMD_ungated [5]=_CMD [4]=_PSTRB [3:0]=0
     ) u_io_probe ( .source(), .probe({
-        dbg_kv_wr_cnt, dbg_kv_rd_cnt, dbg_kv_bd_nz, dbg_vma_cnt,
-        dbg_kv_bd_at_wr, dbg_kv_last_wr, dbg_pp_io_nz, dbg_kv_last_addr, 4'd0
+        dbg_pen_fall_cnt, dbg_cmdu_edge_cnt,
+        dbg_kv_wr_cnt, dbg_kv_rd_cnt, dbg_pp_io_nz,
+        _ProFile_EN, _CMD_ungated, _CMD, _PSTRB, dbg_cmd_while_en
     }), .source_clk(clk_sys), .source_ena(1'b1) );
 
     logic READ_ACK_COP_ungated;
@@ -1374,6 +1403,10 @@ module IO_board(
     logic [7:0] dbg_so_cnt = 0, dbg_ack_cnt = 0, dbg_kbdout_cnt = 0, dbg_kbdin_cnt = 0;
     logic [7:0] dbg_l_in_last = 0, dbg_l_out_last = 0;
     logic       dbg_so_d = 0, dbg_ack_d = 0, dbg_kbdo_d = 1, dbg_kbdi_d = 1;
+    // DEBUG: capture the FIRST 4 keycodes the COP sends the CPU at boot (frozen
+    // after 4) so we can see the exact reset/keypress sequence that sets BTMENU.
+    logic [7:0] kc0 = 0, kc1 = 0, kc2 = 0, kc3 = 0;
+    logic [2:0] kc_idx = 0;
     always_ff @(posedge clk_sys) begin
         if (dotck_en) begin
             dbg_so_d   <= DATA_QUEUED_COP;
@@ -1383,6 +1416,14 @@ module IO_board(
             if (DATA_QUEUED_COP && !dbg_so_d) begin
                 dbg_so_cnt <= dbg_so_cnt + 1'd1;
                 dbg_l_in_last <= L_COP_in;
+                case (kc_idx)
+                    3'd0: kc0 <= L_COP_in;
+                    3'd1: kc1 <= L_COP_in;
+                    3'd2: kc2 <= L_COP_in;
+                    3'd3: kc3 <= L_COP_in;
+                    default: ;
+                endcase
+                if (kc_idx < 3'd4) kc_idx <= kc_idx + 1'd1;
             end
             if (READ_ACK_COP != dbg_ack_d) dbg_ack_cnt <= dbg_ack_cnt + 1'd1;
             if (KBD_out != dbg_kbdo_d) dbg_kbdout_cnt <= dbg_kbdout_cnt + 1'd1;
@@ -1395,8 +1436,8 @@ module IO_board(
         .instance_id ("LCOP"), .probe_width (64), .source_width (1),
         .source_initial_value ("0"), .enable_metastability ("NO")
     ) u_cop_probe ( .source(), .probe({
-        dbg_so_cnt, dbg_ack_cnt, dbg_l_in_last, dbg_l_out_last,
-        dbg_kbdout_cnt, dbg_kbdin_cnt,
+        kc0, kc1, kc2, kc3,
+        dbg_so_cnt, dbg_kbdin_cnt,
         DATA_QUEUED_COP, READ_ACK_COP, _READY_COP, ON,
         KBD_mouse_mux_sel, KBD_reset_COP, KBD_in,
         KBD_out, port_b_out_KBD_VIA[0], KBD_via_DDRB[0], 5'd0

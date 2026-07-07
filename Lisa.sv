@@ -446,12 +446,9 @@ module emu (
             per_max_lat <= per_max; per_max <= 0;
         end
     end
-    wire [31:0] vid_dbg2 = { vid_l_lat[10:0], vid_r_lat[10:0], per_min_lat[9:0] };
-    altsource_probe #(
-        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
-        .instance_id ("LVI2"), .probe_width (32), .source_width (1),
-        .source_initial_value ("0"), .enable_metastability ("NO")
-    ) u_vid2_probe ( .source(), .probe(vid_dbg2), .source_clk(clk_sys), .source_ena(1'b1) );
+    // LVI2 (secondary video-measurement probe) removed: video is solved and the
+    // device is at routing capacity — dropping it prunes the vid_l/vid_r/per_min
+    // frame-measurement chain to free ALMs/routing for the ProFile-debug probes.
     altsource_probe #(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
         .instance_id ("LVID"), .probe_width (32), .source_width (16),

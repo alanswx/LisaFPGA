@@ -450,3 +450,106 @@ mounts the image into S0 — launch via the API, no user needed). Findings:
    was tried and does not work). To verify the disk-read path independently,
    select the ProFile from the menu (click the icon, or Apple+3 = boot ProFile,
    0xF2 is the '3' boot key) and watch LPRO max_state / rd_acks advance.
+
+---
+
+## Session update (2026-07-06): injection tooling + ProFile-gate diagnosis
+
+### mrext keyboard injection (autonomous input, no user needed)
+The MiSTer Remote (mrext, http://192.168.1.196:8182) exposes a **raw websocket**
+at `ws://…:8182/api/ws` that injects keys via Linux **uinput codes**:
+`kbd:<name>`, `kbdRaw:<code>`, `kbdRawDown:<code>`, `kbdRawUp:<code>`.
+Helper: `debug/ws_send.py "kbdRawDown:56" "kbdRawDown:4" "kbdRawUp:4" "kbdRawUp:56"`.
+Key uinput codes: Alt=56, '1'=2 '2'=3 '3'=4, Enter=28, Esc=1, F12=88(OSD).
+**Our adapter maps host Alt → Lisa Apple/Command key** (ps2_to_usb_hid: "Left/
+Right Alt → Apple key"), so `Apple+3` = hold 56, tap 4. Verified reaching the
+adapter: LKBD `kbdsig_edges` climbs on injection. NOTE: mrext has **no mouse**
+injection — keyboard only. The LISA core does **not** support MiSTer framebuffer
+screenshots (POST /api/screenshots returns empty; only the MENU core captures),
+so Lisa-screen verification still needs the user — but the JTAG probes give
+autonomous ground truth.
+
+### Refined root cause: the emulator is NEVER commanded, because `_ProFile_EN` is never asserted
+LPRO over a whole boot shows `cmd_edges=1` (that one edge is a power-on-reset
+glitch: it hit while the FSM was in ST_RESET, so `max_state` never left IDLE) and
+`strb_edges=1`, `rd_acks=0`. The Lisa issues **zero** real ProFile transactions.
+Found the gate in IO_board.sv:1024-1027 —
+`_CMD = (~_ProFile_EN) ? _CMD_E_sampled : 1'b1;` (same for _PSTRB/DR_W). The
+command lines to the emulator are **gated by `_ProFile_EN` = PB2 of the parallel
+VIA**. So the emulator sees nothing unless the boot ROM sets PB2 low to enable
+ProFile comms. Two possibilities, now under test:
+  (a) the STARTUP-FROM menu (0x80/BTMENU, above) blocks the ROM from ever
+      running the ProFile boot/scan → PB2 never asserted; OR
+  (b) PB2/VIA output path is broken so `_ProFile_EN` never reaches the mux.
+Confirmed via ROM listing (WebFetch of Lisa_Boot_ROM_Asm_Listing): BTMENU =
+"any key hit other than caps-lock/mouse", and the ProFile boot happens AFTER the
+menu decision — so if the menu pops, the ProFile is never tried. CPU is parked in
+a cursor/menu-draw loop (~0xFE2DC7-0xFE2DD1, `mulu #$4c` screen-stride calc), i.e.
+the interactive STARTUP-FROM dialog. Injected Apple+2/Apple+3 did NOT change
+`so_cnt` (COP→CPU keycode count frozen at 180) or the CPU PC — the COP isn't
+relaying new keys in this state, so menu navigation via injection is unreliable.
+
+### Added probe LPEN (build in progress) to disambiguate (a) vs (b)
+IO_board.sv after the _CMD gate: counts `_ProFile_EN` falling edges
+(`pen_fall_cnt`) and raw VIA PB4/`_CMD_ungated` toggles (`cmdu_edge_cnt`), plus
+live `_ProFile_EN/_CMD_ungated/_CMD/_PSTRB` levels. Read with the standard
+`debug/read_probes.tcl`. Decode: probe[35:20]=pen_fall_cnt, [19:4]=cmdu_edge_cnt,
+[3]=_ProFile_EN [2]=_CMD_ungated [1]=_CMD [0]=_PSTRB.
+**Interpretation:** pen_fall_cnt==0 ⇒ case (a), fix the 0x80/menu (the Lisa never
+even tries the ProFile). pen_fall_cnt>0 but emulator still idle ⇒ case (b),
+gating/wiring bug. This is verifiable over JTAG without the screen.
+
+---
+
+## Session update (2026-07-07): ProFile blocker fully root-caused to COP keyboard misdecode
+
+Extensive JTAG-probe bisection (LIO/LPRO/LCOP + mrext keyboard injection) proved:
+
+1. **The Lisa NEVER accesses the ProFile.** LIO's pen_fall_cnt / cmd_edges /
+   cmd_while_en are all the SAME single power-on VIA-reset glitch (port_b_out
+   defaults to 0 at VIA reset → _ProFile_EN & _CMD momentarily low). After the
+   VIA is configured, _ProFile_EN stays high forever — the boot ROM never runs
+   the ProFile boot code. So every earlier "the Lisa tried once" reading was a
+   reset artifact. (The reset-race and _CMD E-sample-skew theories were both red
+   herrings from this glitch; the raw-signal datapath change was reverted.)
+
+2. **Why: the Lisa is stuck in the STARTUP-FROM menu**, which the ROM reaches
+   BEFORE the ProFile boot. CPU parked in the menu/cursor-draw loop (~0xFE2DCA).
+
+3. **Why the menu: the COP sends the WRONG keyboard power-up bytes.** LCOP now
+   captures the first 4 COP→CPU keycodes (kc0..kc3, latched at DATA_QUEUED
+   rising). A fresh boot shows exactly TWO bytes: **kc0=0x85, kc1=0x87** — and
+   NO 0x80. RSTSCAN (0xFE09F0) scans COP bytes for RSTCODE **0x80** to init the
+   keyboard (0xFE0A1A reads the ID byte after it). It also special-cases 0x87
+   and ignores 0x85. Because 0x80 never arrives, RSTSCAN never recognizes the
+   reset; the leftover 0x85/0x87 (downstrokes, not alpha-lock 0xFD or mouse
+   0x86) reach KEYSCAN (0xFE1214) → sets BTMENU → STARTUP-FROM menu → ProFile
+   never booted.
+
+4. **Not the mouse** (LMOU pkt_cnt=0 at boot) and **not the adapter logic** (it
+   sends the correct 0x80+0xBF serial reset sequence, verified against RSTSCAN).
+   The COP (t420) is MIS-DECODING the adapter's serial keyboard bits: 0x80→0x85,
+   0xBF→0x87. This is a **keyboard↔COP serial bit-timing mismatch** introduced by
+   the single-clock/clock-enable conversion (COP runs on copck2x_en ~3.9MHz →
+   COPCK ~1.95MHz, ÷16 internally; the adapter drives bits at ~21.5µs tuned for
+   12MHz usbclk). If the COP samples the (correctly-timed) adapter bits at a
+   shifted rate it decodes extra/missing bits.
+
+**Autonomous verification for any fix:** watch LCOP kc0/kc1. Correct = kc0=0x80,
+kc1=0xBF → RSTSCAN succeeds → no menu → the Lisa proceeds to boot the ProFile
+(then LPRO cmd_edges/max_state/rd_acks will finally advance). No screen needed.
+
+**New reusable tooling (this session):**
+- `debug/ws_send.py` — mrext websocket key injection (uinput codes; Alt=Apple).
+  Confirmed reaching the CPU (LCOP so_cnt climbs). mrext has NO mouse injection;
+  LISA core can't do MiSTer screenshots (only MENU core), so Lisa-screen checks
+  still need the user, but JTAG probes give autonomous ground truth.
+- LCOP repurposed to capture the first 4 boot keycodes (kc0..kc3).
+- LIO repurposed for ProFile-enable diagnosis (pen_fall_cnt/cmdu_edge_cnt/
+  cmd_while_en). LVI2 video probe removed (video solved) to relieve routing;
+  QSF now has FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS (design ~90% ALM).
+
+**Next fix (needs build-iterations):** tune the keyboard↔COP serial bit timing so
+the COP decodes 0x80/0xBF. Candidates: (a) adjust the adapter's bit period in
+usb_keyboard_interface.sv to match the COP's sampling, or (b) verify/adjust the
+COP copck enable rate. Verify each attempt via LCOP kc0 → 0x80.
