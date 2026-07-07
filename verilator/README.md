@@ -21,12 +21,18 @@ Run from this directory so the ROM memory symlinks resolve:
 ```
 
 By default the simulator tries to mount `profile.image` from this directory.
-Disk images are local runtime media and are not tracked. To use another ProFile
-image, either pass it as the first argument or set `PROFILE_IMAGE`:
+Disk images are local runtime media and are not tracked. Use `--profile` to
+select another ProFile image:
 
 ```sh
-./obj_dir/Vemu /path/to/profile.image
-PROFILE_IMAGE=/path/to/profile.image ./obj_dir/Vemu
+./obj_dir/Vemu --profile /path/to/profile.image
+```
+
+For command-line runs without SDL/ImGui, use `--headless`. `--cycles` limits
+the run; `--cycles 0` runs until interrupted.
+
+```sh
+./obj_dir/Vemu --headless --profile /path/to/profile.image --cycles 5000000
 ```
 
 ## Notes

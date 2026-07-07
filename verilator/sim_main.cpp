@@ -50,8 +50,63 @@ int trace_console_cnt = 0;
 #include <thread>
 #include <chrono>
 #include <cstdlib>
+#include <cstdint>
 
 enum class RunState {Stopped, Running, SingleClock, MultiClock, StepIn, NextIRQ};
+
+struct SimOptions {
+	bool headless = false;
+	uint64_t cycles = 0;
+	std::string profile_image = "profile.image";
+};
+
+static void PrintUsage(const char* argv0) {
+	fprintf(stderr,
+		"Usage: %s [--profile <image>] [--headless] [--cycles <count>] [--help]\n"
+		"\n"
+		"  --profile <image>  ProFile disk image to mount (default: profile.image)\n"
+		"                     Aliases: --profile-image, --proimage\n"
+		"  --headless         Run without SDL/ImGui windows\n"
+		"  --cycles <count>   Headless cycles to run; 0 runs until interrupted (default: 0)\n",
+		argv0);
+}
+
+static bool ParseOptions(int argc, char** argv, SimOptions* options) {
+	for (int i = 1; i < argc; i++) {
+		std::string arg = argv[i];
+		if (arg == "--help" || arg == "-h") {
+			PrintUsage(argv[0]);
+			exit(0);
+		} else if (arg == "--headless") {
+			options->headless = true;
+		} else if (arg == "--profile" || arg == "--profile-image" || arg == "--proimage") {
+			if (++i >= argc) {
+				fprintf(stderr, "%s requires an image path\n", arg.c_str());
+				return false;
+			}
+			options->profile_image = argv[i];
+		} else if (arg.rfind("--profile=", 0) == 0) {
+			options->profile_image = arg.substr(10);
+		} else if (arg.rfind("--profile-image=", 0) == 0) {
+			options->profile_image = arg.substr(16);
+		} else if (arg.rfind("--proimage=", 0) == 0) {
+			options->profile_image = arg.substr(11);
+		} else if (arg == "--cycles") {
+			if (++i >= argc) {
+				fprintf(stderr, "--cycles requires a count\n");
+				return false;
+			}
+			options->cycles = strtoull(argv[i], NULL, 0);
+		} else if (arg.rfind("--cycles=", 0) == 0) {
+			options->cycles = strtoull(arg.substr(9).c_str(), NULL, 0);
+		} else {
+			fprintf(stderr, "Unknown option: %s\n", arg.c_str());
+			PrintUsage(argv[0]);
+			return false;
+		}
+	}
+	return true;
+}
 
 // Simulation control
 // ------------------
@@ -76,6 +131,7 @@ int pc_breakpoint_addr = 0;
 bool pc_break_enabled;
 bool break_pending = false;
 bool old_vpb = false;
+bool headless_mode = false;
 
 // HPS emulator
 // ------------
@@ -818,7 +874,7 @@ int verilate() {
 		// Set system clock in core
 		top->clk_sys = clk_sys.clk;
 		top->adam = adam_mode;
-		g_vbl_count=video.count_frame;
+		g_vbl_count = headless_mode ? 0 : video.count_frame;
 
 		// Simulate both edges of system clock
 		if (clk_sys.clk != clk_sys.old) {
@@ -838,9 +894,9 @@ int verilate() {
 					last_pc = pc;
 					uint16_t opcode = top->rootp->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__Ir;
 					const char* disasm = disassemble_68k(pc, opcode);
-					fprintf(stderr, "[F%d] %06X: %04X  %s\n", video.count_frame, pc, opcode, disasm);
+					fprintf(stderr, "[F%d] %06X: %04X  %s\n", headless_mode ? 0 : video.count_frame, pc, opcode, disasm);
 					if (trace_console_cnt++ < 1000) {
-						console.AddLog("[F%d] %06X: %04X  %s", video.count_frame, pc, opcode, disasm);
+						console.AddLog("[F%d] %06X: %04X  %s", headless_mode ? 0 : video.count_frame, pc, opcode, disasm);
 					} else if (trace_console_cnt == 1000) {
 						console.AddLog("... Trace console output rate-limited to first 1000 instructions. Check stderr/task logs for full trace.");
 					}
@@ -861,7 +917,7 @@ int verilate() {
 #endif
 
 		// Output pixels on rising edge of pixel clock
-		if (clk_sys.IsRising() && top->CE_PIXEL) {
+		if (!headless_mode && clk_sys.IsRising() && top->CE_PIXEL) {
 			uint32_t colour = 0xFF000000 | top->VGA_B << 16 | top->VGA_G << 8 | top->VGA_R;
 			video.Clock(top->VGA_HB, top->VGA_VB, top->VGA_HS, top->VGA_VS, colour);
 		}
@@ -883,7 +939,7 @@ int verilate() {
 
 			if (main_time % 5000000 == 0) {
 				fprintf(stderr, "main_time: %lld, ON: %d, reset: %d, frame: %d, pwrsw_n: %d\n", 
-					(long long)main_time, top->ON, top->reset, video.count_frame, top->pwrsw_n_out);
+					(long long)main_time, top->ON, top->reset, headless_mode ? 0 : video.count_frame, top->pwrsw_n_out);
 				fflush(stderr);
 			}
 
@@ -912,6 +968,28 @@ void RunBatch(int steps)
 	}
 }
 
+void RunHeadless(uint64_t max_cycles)
+{
+	top->menu = 0;
+	top->joystick_0 = 0;
+	top->joystick_1 = 0;
+	top->ps2_key = 0;
+	top->ps2_mouse = 0;
+	top->ps2_mouse_ext = 0;
+
+	const int batch = 100000;
+	while (max_cycles == 0 || main_time < max_cycles) {
+		for (int i = 0; i < batch && (max_cycles == 0 || main_time < max_cycles); i++) {
+			verilate();
+		}
+	}
+	fprintf(stderr, "headless complete: main_time=%llu ON=%d reset=%d pwrsw_n=%d\n",
+		(unsigned long long)main_time, top->ON, top->reset, top->pwrsw_n_out);
+	top->final();
+	delete top;
+	top = NULL;
+}
+
 unsigned char mouse_clock = 0;
 unsigned char mouse_clock_reduce = 0;
 unsigned char mouse_buttons = 0;
@@ -921,6 +999,11 @@ unsigned char mouse_y = 0;
 char spinner_toggle = 0;
 
 int main(int argc, char** argv, char** env) {
+	SimOptions options;
+	if (!ParseOptions(argc, argv, &options)) {
+		return 1;
+	}
+	headless_mode = options.headless;
 
 	// Create core and initialise
 	top = new Vemu();
@@ -969,6 +1052,12 @@ int main(int argc, char** argv, char** env) {
 	blockdevice.img_readonly = &top->img_readonly;
 	blockdevice.img_size = &top->img_size;
 
+	blockdevice.MountDisk(options.profile_image, 0);
+
+	if (options.headless) {
+		RunHeadless(options.cycles);
+		return 0;
+	}
 
 #ifndef DISABLE_AUDIO
 	audio.Initialise();
@@ -1012,8 +1101,6 @@ int main(int argc, char** argv, char** env) {
 	// iwm_load_disk();
 	//bus.QueueDownload("floppy.nib",1,0);
 //blockdevice.MountDisk("floppy.nib",0);
-const char* profile_image = (argc > 1) ? argv[1] : getenv("PROFILE_IMAGE");
-blockdevice.MountDisk(profile_image && profile_image[0] ? profile_image : "profile.image", 0);
 
        // iwm_init();
        // iwm_reset();
