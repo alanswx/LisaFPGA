@@ -211,6 +211,19 @@ module CPU_board(
             _RSTHLT_555 <= 1'b0;
         end else begin
             // If rst_counter is greater than 20 million, then we've been in reset for about a second, so get out of reset now
+            `ifdef SIMULATION
+            if (rst_counter > 24'd1000) begin
+                _RSTHLT_555 <= 1'b1;
+            end else begin
+                rst_counter <= rst_counter + 1'b1;
+                if (rst_counter < 24'd995) begin
+                    fast_reset <= 1'b1;
+                end else begin
+                    fast_reset <= 1'b0;
+                end
+                _RSTHLT_555 <= 1'b0;
+            end
+            `else
             if (rst_counter > 24'd15000000) begin
                 _RSTHLT_555 <= 1'b1;
             end else begin
@@ -225,6 +238,7 @@ module CPU_board(
                 end
                 _RSTHLT_555 <= 1'b0;
             end
+            `endif
         end
         // Reset is just the 555 reset/halt signal wire-ANDed (or just ANDed in our case) with the CPU RESET output
         _RESET = _RSTHLT_555 & _RSTOUT_CPU;
@@ -1483,6 +1497,7 @@ module CPU_board(
             end
         end
     end
+    `ifndef SIMULATION
     altsource_probe #(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
         .instance_id ("LCPU"), .probe_width (64), .source_width (1),
@@ -1503,5 +1518,6 @@ module CPU_board(
         dbg_cdflop_vpa, dbg_cdcore_vpa, dbg_dtlat_vpa,                       // [4:2] rogue-ack detectors
         dbg_spio_vpa, dbg_earlyack_vpa                                       // [1:0]
     }), .source_clk(clk_sys), .source_ena(1'b1) );
+    `endif
 
 endmodule

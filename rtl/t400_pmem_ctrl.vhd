@@ -74,7 +74,7 @@ library ieee;
 use ieee.numeric_std.all;
 
 -- pragma translate_off
-use work.tb_pack.tb_pc_s;
+-- use work.tb_pack.tb_pc_s;
 -- pragma translate_on
 
 architecture rtl of t400_pmem_ctrl is
@@ -165,7 +165,7 @@ begin
 
   -- pragma translate_off
   -- instrument interrupt testbench
-  tb_pc_s <= pc_q;
+  -- tb_pc_s <= pc_q;
   -- pragma translate_on
 
 

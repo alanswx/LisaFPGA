@@ -520,6 +520,7 @@ module profile (
             cmd_in_rst  <= cmd_in_rst + 4'd1;
         end
     end
+    `ifndef SIMULATION
     altsource_probe #(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
         .instance_id ("LPRO"), .probe_width (64), .source_width (1),
@@ -530,5 +531,6 @@ module profile (
         img_mounted, _PRES, _CMD, _PSTRB, _BSY, R_W, sd_rd, sd_wr,
         rst_at_cmd, pres_at_cmd
     }), .source_clk(clk), .source_ena(1'b1) );
+    `endif
 
 endmodule

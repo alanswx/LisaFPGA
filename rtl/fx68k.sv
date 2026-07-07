@@ -45,7 +45,7 @@ localparam NANO_DOB_ALU = 2'b11;
 
 
 // Clocks, phases and resets
-typedef struct {
+typedef struct packed {
 	logic clk;
 	logic extReset;			// External sync reset on emulated system
 	logic pwrUp;			// Asserted together with reset on emulated system coldstart
@@ -53,7 +53,7 @@ typedef struct {
 } s_clks;
 
 // IRD decoded signals
-typedef struct {
+typedef struct packed {
 	logic isPcRel;
 	logic isTas;
 	logic implicitSp;
@@ -70,7 +70,7 @@ typedef struct {
 } s_irdecod;
 
 // Nano code decoded signals
-typedef struct {
+typedef struct packed {
 	logic permStart;
 	logic waitBusFinish;
 	logic isWrite;

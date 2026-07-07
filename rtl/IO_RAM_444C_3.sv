@@ -37,7 +37,7 @@ module IO_RAM_444C_3(
     `endif
 
     logic [3:0] D_out_int;
-    assign D_out = (!_CS) ? D_out_int : 4'bz;
+    assign D_out = (!_CS && R_W) ? D_out_int : 4'bz;
 
     always_ff @(negedge _CS) begin
         // If the chip is selected and it's a read, then forward the data on to the output
@@ -53,7 +53,7 @@ module IO_RAM_444C_3(
         // If the chip is selected and it's a write, then grab the 4 bits off the bus and write them to RAM
         end else begin
             RAM_array[A] <= D_in;
-            D_out_int <= 4'bz; // Just to get everything off the bus and be safe
+            D_out_int <= 4'h0; // Just to get everything off the bus and be safe
         end
     end
 

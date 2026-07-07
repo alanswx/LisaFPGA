@@ -337,9 +337,16 @@ module top(
     // the old design gated the derived clocks. One ON synchronizer suffices now
     // that everything is in the clk_sys domain. copck2x_en / usbclk_en stay
     // ungated (the COP and USB logic run whenever the FPGA is powered).
+    wire ON_val;
+    `ifdef SIMULATION
+        assign ON_val = 1'b1;
+    `else
+        assign ON_val = ON;
+    `endif
+
     (* ASYNC_REG = "TRUE" *) logic ON_int, ON_sync;
     always_ff @(posedge clk_sys) begin
-        ON_int  <= ON;
+        ON_int  <= ON_val;
         ON_sync <= ON_int;
     end
 
@@ -358,7 +365,7 @@ module top(
         wire sccck_en = sccck_en_raw & on_eff;
     `endif
 
-    // DEBUG (bring-up ISSP): read core liveness / override speed + ON over JTAG.
+    `ifndef SIMULATION
     debug_issp u_debug_issp (
         .clk_sys(clk_sys),
         .pll_locked(pll_locked),
@@ -372,6 +379,11 @@ module top(
         .speed_override_en(dbg_speed_override_en),
         .force_on(dbg_force_on)
     );
+    `else
+    assign dbg_speed_override = 2'b00;
+    assign dbg_speed_override_en = 1'b0;
+    assign dbg_force_on = 1'b0;
+    `endif
 
     // Pixel clock-enable for the MiSTer scaler: one strobe per DOTCK (Lisa pixel).
     assign pixel_ce = dotck_en;
@@ -392,8 +404,8 @@ module top(
 
     always_ff @(posedge clk_sys) begin
         if (copck2x_en) begin
-            ON_prev <= ON;
-            _RSTSW_int <= _RSTSW & ~(ON & ~ON_prev); // Detect the rising edge of ON and use that plus the reset switch to reset the system
+            ON_prev <= ON_val;
+            _RSTSW_int <= _RSTSW & ~(ON_val & ~ON_prev); // Detect the rising edge of ON and use that plus the reset switch to reset the system
         end
     end
 
@@ -470,7 +482,7 @@ module top(
         .TONE(TONE),
         .VC(VC),
         .CPU_ROM_SEL(CPU_ROM_SEL),
-        .blank_video(~ON), // When the Lisa is off, we want to blank the video output
+        .blank_video(~ON_val), // When the Lisa is off, we want to blank the video output
         .scanlines(SCANLINES), // When high, put scanlines on the video output to make it look cool
         .tmds_clock(tmds_clock),
         .tmds(tmds)

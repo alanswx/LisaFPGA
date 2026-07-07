@@ -65,7 +65,7 @@ end t400_stack;
 
 
 -- pragma translate_off
-use work.tb_pack.tb_sa_s;
+-- use work.tb_pack.tb_sa_s;
 -- pragma translate_on
 
 architecture rtl of t400_stack is
@@ -125,7 +125,7 @@ begin
 
   -- pragma translate_off
   -- instrument interrupt testbench
-  tb_sa_s <= sa_q;
+  -- tb_sa_s <= sa_q;
   -- pragma translate_on
 
 

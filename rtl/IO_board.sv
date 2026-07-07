@@ -1258,6 +1258,9 @@ module IO_board(
     end
 
     // Instantiate the VHDL model of the COP421
+    `ifdef SIMULATION
+    t420_notri cop421 (
+    `else
     t420_notri #(
         // 0 = divide by 4
         // 1 = divide by 8
@@ -1266,6 +1269,7 @@ module IO_board(
         .opt_ck_div_g(2), // Make sure it divides the clock by 16 (parameter=2) like the original, previously had it set to 1 (divide by 8)
         .opt_type_g(1)
     ) cop421 (
+    `endif
         .ck_i(clk_sys), // Clock it from the 7.8MHz COPCK_2x clock net
         .ck_en_i(COPCK_clk_enable & copck2x_en), // Use our 3.9MHz-derived clock enable as the clock enable input to the COP
         .reset_n_i(1'b1), // Other than power-on reset, which is handled internally, we never reset the COP because that would wipe the RTC
@@ -1349,6 +1353,7 @@ module IO_board(
             end
         end
     end
+    `ifndef SIMULATION
     altsource_probe #(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
         .instance_id ("LIO"), .probe_width (64), .source_width (1),
@@ -1362,6 +1367,7 @@ module IO_board(
         dbg_kv_wr_cnt, dbg_kv_rd_cnt, dbg_pp_io_nz,
         _ProFile_EN, _CMD_ungated, _CMD, _PSTRB, dbg_cmd_while_en
     }), .source_clk(clk_sys), .source_ena(1'b1) );
+    `endif
 
     logic READ_ACK_COP_ungated;
     logic ca2_oe;
@@ -1431,6 +1437,7 @@ module IO_board(
             dbg_l_out_last <= L_COP_out;
         end
     end
+    `ifndef SIMULATION
     altsource_probe #(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
         .instance_id ("LCOP"), .probe_width (64), .source_width (1),
@@ -1442,6 +1449,7 @@ module IO_board(
         KBD_mouse_mux_sel, KBD_reset_COP, KBD_in,
         KBD_out, port_b_out_KBD_VIA[0], KBD_via_DDRB[0], 5'd0
     }), .source_clk(clk_sys), .source_ena(1'b1) );
+    `endif
 
     // When CA2 is an output, drive the COP's SI line with it, else leave it high
     assign READ_ACK_COP = (ca2_oe) ? READ_ACK_COP_ungated : 1'b1;
