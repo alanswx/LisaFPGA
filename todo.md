@@ -1,5 +1,12 @@
 # TODO — clocking refactor follow-ups (verify/fix after it runs on the FPGA)
 
+> **Hardware bring-up status:** the core now boots on the DE10-Nano, runs at 60 fps,
+> and the framework detects 720×364. Remaining issue: the picture is **black with a
+> white vertical line** (video *content*, not geometry). Full bring-up details,
+> fixes, debug-instrumentation cleanup, and next steps are in
+> **[progress_quartus_handover.md](progress_quartus_handover.md)**.
+
+
 ## What was done
 The Lisa core was converted from many derived/gated/muxed clocks (which overflowed
 the Cyclone V PLLs and could not route) to a **single clock + clock-enable**

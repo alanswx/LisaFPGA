@@ -85,10 +85,13 @@ module top(
         input logic _BSY_ESPROFILE,
         output logic R_W_ESPROFILE,
         output logic _STRB_ESPROFILE,
-        inout logic _PRES_ESPROFILE,
+        output logic _PRES_ESPROFILE, // was inout (open-collector); top is the only driver on MiSTer
         input logic _PARITY_ESPROFILE,
         input logic OCD_ESPROFILE,
-        inout logic [7:0] PD_ESPROFILE,
+        // Was `inout [7:0] PD_ESPROFILE`; split to kill the internal tri-state
+        // (see note at the old pd_esprofile_gen block).
+        input  logic [7:0] PD_ESPROFILE_in,
+        output logic [7:0] PD_ESPROFILE_out,
 
         output logic _CMD_EXTPROFILE,
         input logic _BSY_EXTPROFILE,
@@ -104,7 +107,12 @@ module top(
         inout logic KBD_DN,
         inout logic KBD_DP,
 
-        inout logic KBD,
+        // Was `inout logic KBD` (open-collector keyboard line). Quartus resolves
+        // internal undriven tri-nets to 0 here (no pull-up), which held the COP's
+        // keyboard line low forever. Split into explicit in/out; the wired-AND
+        // happens in Lisa.sv.
+        input logic KBD_line_in,
+        output logic KBD_line_out,
 
         input logic KBD_SEL,
 
@@ -144,7 +152,11 @@ module top(
         input logic CPU_ROM_SEL,
         input logic IO_ROM_SEL,
         output logic usbclk_en, // ~12MHz usbclk clock-enable (usb runs on clk_sys now)
-        input logic clk_sys   // 81.50016 MHz master clock; all Lisa clocks are divided from this
+        input logic clk_sys,  // 81.50016 MHz master clock; all Lisa clocks are divided from this
+        input logic pll_locked, // DEBUG (bring-up ISSP): main_pll locked status
+        output logic pixel_ce, // DOTCK-rate pixel clock-enable for the MiSTer video scaler (CE_PIXEL)
+        output logic dbg_va,   // VA_overflow (high during vertical blanking)
+        output logic dbg_clr   // _clr_vid_clk (marks horizontal active start)
     );
 
     // This is the board ID for the LisaFPGA identity register; software can read it to see if it's on a real Lisa or an FPGA
@@ -277,9 +289,15 @@ module top(
     wire dotck_en_raw, c16m_en_raw, c5m_en_raw, copck2x_en, sccck2x_en;
     // usbclk_en is a module output port (declared in the port list)
 
+    // DEBUG (bring-up ISSP): live override of speed-select and ON-gate over JTAG.
+    wire [1:0] dbg_speed_override;
+    wire       dbg_speed_override_en;
+    wire       dbg_force_on;
+    wire [1:0] speed_sel_eff = dbg_speed_override_en ? dbg_speed_override : SPEED_SEL;
+
     clock_divider primary_clock_divider (
         .clk_sys(clk_sys),
-        .speed_sel(SPEED_SEL),
+        .speed_sel(speed_sel_eff),
         .dotck_en(dotck_en_raw),
         .c16m_en(c16m_en_raw),
         .c5m_en(c5m_en_raw),
@@ -332,11 +350,37 @@ module top(
         wire c5m_en   = c5m_en_raw;
         wire sccck_en = sccck_en_raw;
     `else
-        wire dotck_en = dotck_en_raw & ON_sync;
-        wire c16m_en  = c16m_en_raw  & ON_sync;
-        wire c5m_en   = c5m_en_raw   & ON_sync;
-        wire sccck_en = sccck_en_raw & ON_sync;
+        // DEBUG (bring-up): dbg_force_on can bypass the ON gate over JTAG.
+        wire on_eff = ON_sync | dbg_force_on;
+        wire dotck_en = dotck_en_raw & on_eff;
+        wire c16m_en  = c16m_en_raw  & on_eff;
+        wire c5m_en   = c5m_en_raw   & on_eff;
+        wire sccck_en = sccck_en_raw & on_eff;
     `endif
+
+    // DEBUG (bring-up ISSP): read core liveness / override speed + ON over JTAG.
+    debug_issp u_debug_issp (
+        .clk_sys(clk_sys),
+        .pll_locked(pll_locked),
+        .vsync_n(_VSYNC),
+        .hsync_n(_HSYNC),
+        .dotck_en(dotck_en),
+        .core_on(ON),
+        .core_on_sync(ON_sync),
+        .reset_n(_RESET),
+        .speed_override(dbg_speed_override),
+        .speed_override_en(dbg_speed_override_en),
+        .force_on(dbg_force_on)
+    );
+
+    // Pixel clock-enable for the MiSTer scaler: one strobe per DOTCK (Lisa pixel).
+    assign pixel_ce = dotck_en;
+
+    // Expose the core's raw blanking signals; Lisa.sv reconstructs a clean
+    // 720-wide horizontal DE window from them (VA_overflow = vertical blank,
+    // _clr_vid_clk's first fall each line = horizontal active start).
+    assign dbg_va  = VA_overflow;
+    assign dbg_clr = _clr_vid_clk;
 
     logic _RSTSW_int;
 
@@ -889,8 +933,8 @@ module top(
     // There's a little more we need to do for the keyboard though; it's bidirectional, so we need to make an IOBUF for the Lisa keyboard interface
     logic KBD_in_LISA;
     logic KBD_out_LISA;
-    assign KBD = ~KBD_out_LISA ? 1'b0 : 1'bZ;
-    assign KBD_in_LISA = KBD;
+    assign KBD_line_out = KBD_out_LISA;    // drive value (0 = pulling the line low)
+    assign KBD_in_LISA  = KBD_line_in;     // combined line state from Lisa.sv
 
     // And we have to mux between the USB and Lisa keyboard interfaces, depending on the KBD_SEL signal
     always_comb begin
@@ -935,16 +979,17 @@ module top(
     logic PR_W_ungated_ExtProFile;
     logic _CRES_out_ExtProFile;
     logic _CRES_in_ExtProFile;
-    // All the ProFile data bus signals are bidirectional, so we use behavioral tri-state assignments
-    generate
-        for (i = 0; i < 8; i++) begin: pd_esprofile_gen
-            assign PD_ESPROFILE[i] = (~_ProFile_EN_ESProFile && ~PR_W_ungated_ESProFile) ? PD_out_ESProFile[i] : 1'bZ;
-            assign PD_in_ESProFile[i] = PD_ESPROFILE[i];
-        end
-    endgenerate
+    // Was a behavioral tri-state bus + open-collector reset. Quartus resolves
+    // internal z-nets unpredictably (same hazard as BD_OE / the KBD line), so
+    // the ESProFile bus is now explicit: top outputs its drive value (FF =
+    // pulled-up idle) and reads the combined line from Lisa.sv, which muxes
+    // in the profile emulator's drive.
+    assign PD_ESPROFILE_out = (~_ProFile_EN_ESProFile && ~PR_W_ungated_ESProFile)
+                              ? PD_out_ESProFile : 8'hFF;
+    assign PD_in_ESProFile  = PD_ESPROFILE_in;
 
-    // CRES/PRES reset line is open-collector (pull low or high-Z)
-    assign _PRES_ESPROFILE = ~_CRES_out_ESProFile ? 1'b0 : 1'bZ;
+    // CRES/PRES reset line: top is the only driver on MiSTer (plain output).
+    assign _PRES_ESPROFILE  = _CRES_out_ESProFile;
     assign _CRES_in_ESProFile = _PRES_ESPROFILE;
 
     // Now do the same thing for the external "real" ProFile
@@ -1108,6 +1153,9 @@ module top(
             assign DIN_SRAM[i] = D_SRAM[i];
         end
     endgenerate
+
+    // (Removed the 128-deep LTRC dot-trace buffer — it did its job finding the
+    //  BD tri-state bug and was too large to keep in the device.)
 
     `ifdef SIMULATION
         // If we're simulating, just instantiate a single 512KB memory board; it's the only one that supports block RAM

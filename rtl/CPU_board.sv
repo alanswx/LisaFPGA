@@ -148,13 +148,15 @@ module CPU_board(
     // We need an output enable signal too, for the external BD mux in top.sv
     // That's because the BD signal is driven by multiple sources (CPU, I/O, etc.) and the synthesizer won't let us do our normal tri-state trick
     assign BD = (READ & ~_MDEN) ? MD_IN : 16'bz;
-    tri0 BD_OE_int;
-    assign BD_OE = BD_OE_int;
-    assign BD_OE_int = (READ & ~_MDEN) ? 1'b1 : 1'bz;
+    // BD_OE was a tri0 net with four `cond ? 1'b1 : 1'bz` drivers. Quartus
+    // resolves internal 'z as '1' (unlike Vivado), which made the net a
+    // CONSTANT 1 — so top's BD mux always selected the CPU board and the CPU
+    // could never read the I/O board (boot ROM error 50, COPS VIA). Replaced
+    // with an explicit OR of the four original drive conditions (the _RMEA /
+    // _RBES terms live further down; assign is at the end of the module).
     //assign BD = (READ & ~_MDEN) ? MD : 16'bz;
     // BD can also be set to UD if we're doing a write and _DBON is asserted, else high-z
     assign BD = (~READ & ~_DBON) ? UD_CPU_out : 16'bz;
-    assign BD_OE_int = (~READ & ~_DBON) ? 1'b1 : 1'bz;
     // And finally, UD can take on the value of BD if we're doing a read and _DBON is asserted, else high-z
     assign UD_CPU_in = (READ & ~_DBON) ? BD : 16'bz;
 
@@ -356,7 +358,6 @@ module CPU_board(
     end
     // Put the latched data on the bus if the CPU wants to read the latch, otherwise tri-state it
     assign BD = _RMEA ? 16'bz : mea_latch;
-    assign BD_OE_int = _RMEA ? 1'bz : 1'b1;
 
 
     // There's another address-related latch to do though
@@ -485,7 +486,6 @@ module CPU_board(
     // The low 2 bits are the current state of the speed selection switches, so software can know how fast it's running
     logic _RBES;
     assign BD = _RBES ? 16'bz : {LisaFPGA_ID, 1'b0, 1'b0, LisaFPGA_Desktop, SPEED_SEL, 1'b0, INVID, _CSYNC, VID, _BUST_latched, _VTIR, _HDER_latched, _SFER_latched};
-    assign BD_OE_int = _RBES ? 1'bz : 1'b1;
     // There are two more signals that are generated as by-products of the latch
     // One is _HPIR (high-priority interrupt), which fires if we get an NMI or either a hard or soft memory error
     // As with _IOIR_internal a few lines ago, we need to synchronize both _NMI and HDER/SFER to DOTCK before we combine them to form HPIR
@@ -1159,6 +1159,10 @@ module CPU_board(
     // And the other READ case should be pretty obvious
     assign MREAD = ~CPUC1 | READ;
 
+    // Explicit OR of the four original BD_OE drive conditions (see the note at
+    // the old tri0 BD_OE_int declaration near the top of the module).
+    assign BD_OE = (READ & ~_MDEN) | (~READ & ~_DBON) | ~_RMEA | ~_RBES;
+
     // And now for the last thing on our list: the video circuitry
     // First, we need to make a counter that counts through all the addresses of the video state machine ROM
     logic [7:0] VSROM_address;
@@ -1422,5 +1426,82 @@ module CPU_board(
         .oEdb(UD_CPU_out),
         .eab(UA_CPU)
     );
+
+    // DEBUG (bring-up ISSP "LCPU", remove for release): capture the last
+    // program-space fetch address (~the PC), count bus errors, and expose the
+    // whole memory-error NMI chain (diagnostic wrong-parity bit -> _HDER ->
+    // _HDER_latched -> _HPIR -> IPL) with sticky "ever seen" flags, so one JTAG
+    // read shows which stage of the parity-error path is broken.
+    logic [23:1] dbg_pc = '0;
+    logic [5:0]  dbg_berr_cnt = '0;
+    logic        dbg_as_d = 1'b1, dbg_berr_d = 1'b1;
+    logic        dbg_ipl7_seen = 0, dbg_hderint_seen = 0, dbg_hderin_seen = 0;
+    logic        dbg_hderlat_seen = 0, dbg_hpir_seen = 0;
+    logic        dbg_sferint_seen = 0, dbg_sferin_seen = 0, dbg_sferlat_seen = 0;
+    logic        dbg_nmi_seen = 0;
+    logic [3:0]  dbg_vpawr = 0;
+    logic        dbg_vpawr_udhi = 0, dbg_vpawr_ud_nz_seen = 0;
+    logic        dbg_cdflop_vpa = 0, dbg_cdcore_vpa = 0, dbg_dtlat_vpa = 0;
+    logic        dbg_spio_vpa = 0, dbg_earlyack_vpa = 0;
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
+            dbg_as_d   <= _UAS;
+            dbg_berr_d <= _BERR;
+            if (dbg_as_d && !_UAS && FC[1] && !FC[0]) dbg_pc <= UA;
+            if (dbg_berr_d && !_BERR && !(&dbg_berr_cnt)) dbg_berr_cnt <= dbg_berr_cnt + 1'd1;
+            if (_IPL == 3'b000)   dbg_ipl7_seen    <= 1'b1;
+            if (HDER_int)         dbg_hderint_seen <= 1'b1;
+            if (!_HDER_in)        dbg_hderin_seen  <= 1'b1;
+            if (!_HDER_latched)   dbg_hderlat_seen <= 1'b1;
+            if (!_HPIR)           dbg_hpir_seen    <= 1'b1;
+            if (SFER_int)         dbg_sferint_seen <= 1'b1;
+            if (!_SFER_in)        dbg_sferin_seen  <= 1'b1;
+            if (!_SFER_latched)   dbg_sferlat_seen <= 1'b1;
+            if (!_NMI)            dbg_nmi_seen     <= 1'b1;
+            // Capture the BD write-driver enables at the E-falling strobe of a
+            // 6800-style (VPA) write — the moment the kbd VIA latches data.
+            // BD is driven from UD_CPU_out only when (~READ & ~_DBON).
+            if (E_neg_phase && !_VPA_in && !READ) begin
+                dbg_vpawr <= {_DBON, _SPIO, _AS, |UD_CPU_out[7:0]};
+                dbg_vpawr_udhi <= |UD_CPU_out[15:8];
+                if (UD_CPU_out != 16'h0000) dbg_vpawr_ud_nz_seen <= 1'b1;
+            end
+            // Early-termination detectors: during a VPA cycle nothing on the
+            // CPU board should ack the cycle — VMA/E is the only legal
+            // terminator. If CDACK_core or the async DTACK_latch ever asserts
+            // mid-VPA-cycle, a rogue ack (e.g. a decode glitch from the
+            // _CMUX-muxed address bits) is ending 6800 cycles early.
+            if (!_VPA_in && !_AS) begin
+                if (CDACK_flop)   dbg_cdflop_vpa  <= 1'b1;
+                if (CDACK_core)   dbg_cdcore_vpa  <= 1'b1;
+                if (DTACK_latch)  dbg_dtlat_vpa   <= 1'b1;
+                // The path the flop detectors miss: _CDACK asserts directly
+                // when _SPIO goes low. An early ack (before VMA) ends the 6800
+                // cycle before its E-falling data phase.
+                if (!_SPIO)              dbg_spio_vpa    <= 1'b1;
+                if (!_CDACK && _VMA) dbg_earlyack_vpa <= 1'b1;
+            end
+        end
+    end
+    altsource_probe #(
+        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
+        .instance_id ("LCPU"), .probe_width (64), .source_width (1),
+        .source_initial_value ("0"), .enable_metastability ("NO")
+    ) u_cpu_probe ( .source(), .probe({
+        _HALTOUT_CPU, _RSTOUT_CPU, dbg_berr_cnt, dbg_pc, dbg_as_d,          // [63:32]
+        _IPL, dbg_ipl7_seen,                                                 // [31:28]
+        HDER_int, dbg_hderint_seen,                                          // [27:26]
+        _HDER_in, dbg_hderin_seen,                                           // [25:24]
+        _HDER_latched, dbg_hderlat_seen,                                     // [23:22]
+        _HDMSK, _HPIR, dbg_hpir_seen,                                        // [21:19]
+        SFER_int, dbg_sferint_seen,                                          // [18:17]
+        _SFER_in, dbg_sferin_seen,                                           // [16:15]
+        _SFER_latched, dbg_sferlat_seen,                                     // [14:13]
+        _SFMSK, dbg_nmi_seen,                                                // [12:11]
+        dbg_vpawr,                                                           // [10:7] {_DBON,_SPIO,_AS,|UDlo}
+        dbg_vpawr_udhi, dbg_vpawr_ud_nz_seen,                                // [6:5]
+        dbg_cdflop_vpa, dbg_cdcore_vpa, dbg_dtlat_vpa,                       // [4:2] rogue-ack detectors
+        dbg_spio_vpa, dbg_earlyack_vpa                                       // [1:0]
+    }), .source_clk(clk_sys), .source_ena(1'b1) );
 
 endmodule

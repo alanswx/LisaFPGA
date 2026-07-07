@@ -44,9 +44,11 @@ module clock_divider (
     end
 
     // --- DOTCK enable -------------------------------------------------------
-    // speed_sel mapping (matches the old behavioral clock mux in top.sv):
-    //   11 -> 20.4MHz  (/4)     10 -> 40.75MHz (/2)
-    //   01 -> 61.1MHz  (3-of-4) 00 -> 81.5MHz  (/1)
+    // speed_sel mapping matches the OSD menu "CPU Speed 1x/2x/3x/4x" = 00/01/10/11:
+    //   00 (1x) -> 20.4MHz  (/4)     01 (2x) -> 40.75MHz (/2)
+    //   10 (3x) -> 61.1MHz  (3-of-4) 11 (4x) -> 81.5MHz  (/1)
+    // (The old behavioral mux in top.sv had this inverted, which ran the default
+    //  1x setting at 80MHz -> 4x-too-fast video. Fixed here.)
     reg [1:0] dcnt = 2'b00;
     always @(posedge clk_sys) begin
         dcnt <= dcnt + 2'b01;
@@ -54,10 +56,10 @@ module clock_divider (
     reg dotck_en_r;
     always @(*) begin
         case (speed_sel_sync)
-            2'b11:   dotck_en_r = (dcnt == 2'b00);   // /4  -> 20.4 MHz
-            2'b10:   dotck_en_r = (dcnt[0] == 1'b0); // /2  -> 40.75 MHz
-            2'b01:   dotck_en_r = (dcnt != 2'b11);   // 3/4 -> ~61.1 MHz (irregular; see todo.md)
-            default: dotck_en_r = 1'b1;              // /1  -> 81.5 MHz
+            2'b00:   dotck_en_r = (dcnt == 2'b00);   // 1x -> /4  -> 20.4 MHz
+            2'b01:   dotck_en_r = (dcnt[0] == 1'b0); // 2x -> /2  -> 40.75 MHz
+            2'b10:   dotck_en_r = (dcnt != 2'b11);   // 3x -> 3/4 -> ~61.1 MHz (irregular; see todo.md)
+            default: dotck_en_r = 1'b1;              // 4x -> /1  -> 81.5 MHz
         endcase
     end
     assign dotck_en = dotck_en_r;

@@ -383,9 +383,9 @@ module IO_board(
     // So we have to make BD_out and BD_OE signals here that go to top.sv
     // We use a tri-state OE internally to make it easier to set the OE everywhere, and then we forward it to the standard logic output
     // We'll drive BD_out later when we drive it from IO_D as well
-    tri0 BD_OE_int;
-    assign BD_OE = BD_OE_int;
-    assign BD_OE_int = (~FDC_RAM_addr_select && READ) ? 1'b1 : 1'bz;
+    // Same Quartus 'z-as-1 tri0 hazard as CPU_board's BD_OE (see note there):
+    // replaced the two z-drivers with an explicit OR.
+    assign BD_OE = (~FDC_RAM_addr_select & READ) | (A[12] & ~_INTIO & READ);
 
     // Thanks to a lack of tri-state logic, we have to do some multiplexing on the RAM, which is what RD_in is for
     logic [7:0] RD_in;
@@ -1275,6 +1275,65 @@ module IO_board(
     logic KBIR;
     assign _KBIR = ~KBIR;
 
+    // DEBUG (bring-up ISSP "LIO", remove for release): monitor the keyboard-VIA
+    // access path. VIA1 is reached through the 68k's 6800-style VPA/VMA/E cycle
+    // (unlike the async parallel VIA), so if the boot ROM reports error 50
+    // (COPS VIA), count each stage: VPA requested -> VMA response -> chip
+    // select, plus last written/read data, to see where the chain breaks.
+    logic [7:0] dbg_kv_wr_cnt = 0, dbg_kv_rd_cnt = 0;
+    logic [7:0] dbg_vma_cnt = 0, dbg_vpa_cnt = 0, dbg_epos_cnt = 0;
+    logic [7:0] dbg_kv_last_wr = 0, dbg_kv_last_rd = 0, dbg_kv_bd_at_wr = 0, dbg_kv_bd_nz = 0;
+    logic [7:0] dbg_pp_io_nz = 0;
+    logic [3:0] dbg_kv_last_addr = 0;
+    logic       dbg_vma_d = 1, dbg_cskv_d = 1, dbg_kv_sel_d = 0;
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
+            dbg_vma_d  <= _VMA;
+            dbg_cskv_d <= _CS_KBD_VIA;
+            dbg_kv_sel_d <= CS_KBD_VIA;
+            if (dbg_vma_d && !_VMA)         dbg_vma_cnt <= dbg_vma_cnt + 1'd1;
+            if (dbg_cskv_d && !_CS_KBD_VIA) dbg_vpa_cnt <= dbg_vpa_cnt + 1'd1;
+            if (E_pos_phase)                dbg_epos_cnt <= dbg_epos_cnt + 1'd1;
+            if (CS_KBD_VIA && !dbg_kv_sel_d) begin // first tick of each selected access
+                dbg_kv_last_addr <= A[4:1];
+                if (READ) begin
+                    dbg_kv_rd_cnt <= dbg_kv_rd_cnt + 1'd1;
+                end else begin
+                    dbg_kv_wr_cnt <= dbg_kv_wr_cnt + 1'd1;
+                end
+            end
+            if (dbg_kv_sel_d && !CS_KBD_VIA && READ) dbg_kv_last_rd <= D_out_KBD_VIA; // capture at access end
+            // Capture the data path at the exact moment the via6522 model latches
+            // a write (wen & E-falling strobe): IO_D is what the VIA sees,
+            // BD_in[7:0] is what the CPU/top mux delivered. Nonzero BD with zero
+            // IO_D = the IO_D driver condition is broken; both zero = CPU/top side.
+            if (CS_KBD_VIA && !READ && E_neg_phase) begin
+                dbg_kv_last_wr <= IO_D;
+                dbg_kv_bd_at_wr <= BD_in[7:0];
+            end
+            // Latch ANY nonzero write data seen on BD during a kbd-VIA write
+            // window: distinguishes "data never present" from "data gone by the
+            // E-falling strobe".
+            if (CS_KBD_VIA && !READ && BD_in[7:0] != 8'h00) begin
+                dbg_kv_bd_nz <= BD_in[7:0];
+            end
+            // Control: same sticky capture for the parallel VIA (async/DTACK
+            // device whose identical ROM test PASSES) — proves the working
+            // write path really carries nonzero data through IO_D.
+            if (CS_PP_VIA && !READ && IO_D != 8'h00) begin
+                dbg_pp_io_nz <= IO_D;
+            end
+        end
+    end
+    altsource_probe #(
+        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
+        .instance_id ("LIO"), .probe_width (64), .source_width (1),
+        .source_initial_value ("0"), .enable_metastability ("NO")
+    ) u_io_probe ( .source(), .probe({
+        dbg_kv_wr_cnt, dbg_kv_rd_cnt, dbg_kv_bd_nz, dbg_vma_cnt,
+        dbg_kv_bd_at_wr, dbg_kv_last_wr, dbg_pp_io_nz, dbg_kv_last_addr, 4'd0
+    }), .source_clk(clk_sys), .source_ena(1'b1) );
+
     logic READ_ACK_COP_ungated;
     logic ca2_oe;
     logic [7:0] L_COP_out_int;
@@ -1306,6 +1365,42 @@ module IO_board(
         .cb2_i(1'b0), // Make sure the unused CB2 input is tied to a known state
         .irq(KBIR) // The IRQ from this VIA is _KBIR that goes to the CPU board
     );
+
+    // DEBUG (bring-up ISSP "LCOP", remove for release): COP<->VIA1 handshake
+    // monitor. The boot ROM is stuck in ReadCOPS polling for the COP's startup
+    // byte; this shows whether the COP raises SO (data queued), what byte it
+    // puts on the L bus, whether the 68k's read-acks reach it, and whether the
+    // COP is busy talking to the keyboard line instead.
+    logic [7:0] dbg_so_cnt = 0, dbg_ack_cnt = 0, dbg_kbdout_cnt = 0, dbg_kbdin_cnt = 0;
+    logic [7:0] dbg_l_in_last = 0, dbg_l_out_last = 0;
+    logic       dbg_so_d = 0, dbg_ack_d = 0, dbg_kbdo_d = 1, dbg_kbdi_d = 1;
+    always_ff @(posedge clk_sys) begin
+        if (dotck_en) begin
+            dbg_so_d   <= DATA_QUEUED_COP;
+            dbg_ack_d  <= READ_ACK_COP;
+            dbg_kbdo_d <= KBD_out;
+            dbg_kbdi_d <= KBD_in;
+            if (DATA_QUEUED_COP && !dbg_so_d) begin
+                dbg_so_cnt <= dbg_so_cnt + 1'd1;
+                dbg_l_in_last <= L_COP_in;
+            end
+            if (READ_ACK_COP != dbg_ack_d) dbg_ack_cnt <= dbg_ack_cnt + 1'd1;
+            if (KBD_out != dbg_kbdo_d) dbg_kbdout_cnt <= dbg_kbdout_cnt + 1'd1;
+            if (KBD_in  != dbg_kbdi_d) dbg_kbdin_cnt  <= dbg_kbdin_cnt + 1'd1;
+            dbg_l_out_last <= L_COP_out;
+        end
+    end
+    altsource_probe #(
+        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
+        .instance_id ("LCOP"), .probe_width (64), .source_width (1),
+        .source_initial_value ("0"), .enable_metastability ("NO")
+    ) u_cop_probe ( .source(), .probe({
+        dbg_so_cnt, dbg_ack_cnt, dbg_l_in_last, dbg_l_out_last,
+        dbg_kbdout_cnt, dbg_kbdin_cnt,
+        DATA_QUEUED_COP, READ_ACK_COP, _READY_COP, ON,
+        KBD_mouse_mux_sel, KBD_reset_COP, KBD_in,
+        KBD_out, port_b_out_KBD_VIA[0], KBD_via_DDRB[0], 5'd0
+    }), .source_clk(clk_sys), .source_ena(1'b1) );
 
     // When CA2 is an output, drive the COP's SI line with it, else leave it high
     assign READ_ACK_COP = (ca2_oe) ? READ_ACK_COP_ungated : 1'b1;
@@ -1387,7 +1482,6 @@ module IO_board(
     // That happens whenever A12 and _INTIO are both asserted, the direction (BD to IO_D or IO_D to BD) is determined by READ
     // And do BD_out for the FDC as well
     // Once again, BD is muxed in the top-level module, so we need an OE too
-    assign BD_OE_int = (A[12] & ~_INTIO & READ) ? 1'b1 : 1'bz;
     assign IO_D = (A[12] & ~_INTIO & ~READ) ? BD_in[7:0] : 8'bz;
 
     always_comb begin

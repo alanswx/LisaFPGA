@@ -17,7 +17,11 @@ module profile (
     input  wire        R_W,             // Read/Write select from Lisa (1 = Read, 0 = Write)
     output reg         _BSY,            // Busy line to Lisa (active low)
     output reg         _PARITY,         // Parity bit to Lisa
-    inout  wire [7:0]  PD,              // Bidirectional 8-bit data bus
+    // Was `inout [7:0] PD` (internal tri-state; unreliable under Quartus).
+    // Split into explicit in/out + output-enable; the bus mux lives in Lisa.sv.
+    input  wire [7:0]  PD_i,            // Combined data bus state
+    output wire [7:0]  PD_o,            // Our drive value
+    output wire        PD_oe_o,         // 1 = we are driving the bus
 
     // MiSTer HPS SD Card Interface
     output reg  [31:0] sd_lba,          // LBA sector address
@@ -27,14 +31,16 @@ module profile (
     input  wire  [7:0] sd_buff_addr,    // Sector buffer word address (0-255)
     input  wire [15:0] sd_buff_dout,    // Data from HPS to FPGA
     output wire [15:0] sd_buff_din,     // Data from FPGA to HPS
-    input  wire        sd_buff_wr       // Buffer write enable from HPS
+    input  wire        sd_buff_wr,      // Buffer write enable from HPS
+    input  wire        img_mounted      // DEBUG: is a disk image mounted
 );
 
     // Tri-state buffer control for parallel data bus
     reg  [7:0] pd_out;
     reg        pd_oe;
-    assign PD = pd_oe ? pd_out : 8'hZZ;
-    wire [7:0] pd_in = PD;
+    assign PD_o = pd_out;
+    assign PD_oe_o = pd_oe;
+    wire [7:0] pd_in = PD_i;
 
     // Odd parity generation: XOR sum of driven data bits
     always_comb begin
@@ -483,5 +489,34 @@ module profile (
             endcase
         end
     end
+
+    // DEBUG (bring-up ISSP "LPRO", remove for release): trace the ProFile boot.
+    //  state       = current FSM state
+    //  max_state   = furthest state reached (how far the boot handshake got)
+    //  cmd0        = commandBuffer[0] (00=read, 01/02/03=write)
+    //  blk         = low 12 bits of block_num requested
+    //  cmd_edges   = _CMD falling edges (Lisa starting transactions)
+    //  strb_edges  = _PSTRB falling edges (byte strobes)
+    //  rd_acks     = completed SD reads (sd_ack while sd_rd)
+    //  pres        = _PRES level (0 = Lisa holding ProFile in reset)
+    reg [4:0] max_state = 0;
+    reg [7:0] cmd_edges = 0, strb_edges = 0, rd_acks = 0;
+    reg cmd_d = 1, strb_d = 1, rd_ack_d = 0;
+    always_ff @(posedge clk) begin
+        if (state > max_state) max_state <= state;
+        cmd_d <= _CMD; strb_d <= _PSTRB; rd_ack_d <= (sd_rd & sd_ack);
+        if (cmd_d && !_CMD)   cmd_edges  <= cmd_edges + 8'd1;
+        if (strb_d && !_PSTRB) strb_edges <= strb_edges + 8'd1;
+        if (!rd_ack_d && (sd_rd & sd_ack)) rd_acks <= rd_acks + 8'd1;
+    end
+    altsource_probe #(
+        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
+        .instance_id ("LPRO"), .probe_width (64), .source_width (1),
+        .source_initial_value ("0"), .enable_metastability ("NO")
+    ) u_pro_probe ( .source(), .probe({
+        state, max_state, commandBuffer[0], block_num[11:0],
+        cmd_edges, strb_edges, rd_acks,
+        img_mounted, _PRES, _CMD, _PSTRB, _BSY, R_W, sd_rd, sd_wr, 2'b0
+    }), .source_clk(clk), .source_ena(1'b1) );
 
 endmodule
