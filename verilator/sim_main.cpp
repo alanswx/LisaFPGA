@@ -61,16 +61,19 @@ struct SimOptions {
 	bool trace = false;
 	bool boot_profile = false;
 	std::string profile_image = "profile.image";
+	std::string screenshot;
 };
 
 static void PrintUsage(const char* argv0) {
 	fprintf(stderr,
-		"Usage: %s [--profile <image>] [--headless] [--cycles <count>] [--boot-profile] [--trace] [--help]\n"
+		"Usage: %s [--profile <image>] [--headless] [--cycles <count>] [--screenshot <path>] [--boot-profile] [--trace] [--help]\n"
 		"\n"
 		"  --profile <image>  ProFile disk image to mount (default: profile.image)\n"
 		"                     Aliases: --profile-image, --proimage\n"
 		"  --headless         Run without SDL/ImGui windows\n"
 		"  --cycles <count>   Headless cycles to run; 0 runs until interrupted (default: 0)\n"
+		"  --screenshot <path>\n"
+		"                     Headless: save the final VGA frame as a binary PPM image\n"
 		"  --boot-profile     Headless: select ProFile at the Lisa STARTUP FROM menu\n"
 		"  --trace            Enable 68k instruction trace output\n"
 		"  --status-interval <count>\n"
@@ -110,6 +113,14 @@ static bool ParseOptions(int argc, char** argv, SimOptions* options) {
 			options->cycles = strtoull(argv[i], NULL, 0);
 		} else if (arg.rfind("--cycles=", 0) == 0) {
 			options->cycles = strtoull(arg.substr(9).c_str(), NULL, 0);
+		} else if (arg == "--screenshot") {
+			if (++i >= argc) {
+				fprintf(stderr, "--screenshot requires a path\n");
+				return false;
+			}
+			options->screenshot = argv[i];
+		} else if (arg.rfind("--screenshot=", 0) == 0) {
+			options->screenshot = arg.substr(13);
 		} else if (arg == "--status-interval") {
 			if (++i >= argc) {
 				fprintf(stderr, "--status-interval requires a count\n");
@@ -156,6 +167,7 @@ bool headless_boot_profile = false;
 bool headless_boot_profile_started = false;
 uint64_t headless_boot_profile_ready_time = 0;
 size_t headless_boot_profile_step = 0;
+std::string headless_screenshot_path;
 
 // HPS emulator
 // ------------
@@ -1073,7 +1085,7 @@ int verilate() {
 #endif
 
 		// Output pixels on rising edge of pixel clock
-		if (!headless_mode && clk_sys.IsRising() && top->CE_PIXEL) {
+		if ((!headless_mode || !headless_screenshot_path.empty()) && clk_sys.IsRising() && top->CE_PIXEL) {
 			uint32_t colour = 0xFF000000 | top->VGA_B << 16 | top->VGA_G << 8 | top->VGA_R;
 			video.Clock(top->VGA_HB, top->VGA_VB, top->VGA_HS, top->VGA_VS, colour);
 		}
@@ -1144,6 +1156,15 @@ void RunHeadless(uint64_t max_cycles)
 	}
 	fprintf(stderr, "headless complete: main_time=%llu ON=%d reset=%d pwrsw_n=%d\n",
 		(unsigned long long)main_time, top->ON, top->reset, top->pwrsw_n_out);
+	if (!headless_screenshot_path.empty()) {
+		if (video.SavePPM(headless_screenshot_path.c_str())) {
+			fprintf(stderr, "headless: wrote screenshot %s frame=%d\n",
+				headless_screenshot_path.c_str(), video.count_frame);
+		} else {
+			fprintf(stderr, "headless: failed to write screenshot %s\n",
+				headless_screenshot_path.c_str());
+		}
+	}
 	top->final();
 	delete top;
 	top = NULL;
@@ -1165,6 +1186,7 @@ int main(int argc, char** argv, char** env) {
 	headless_mode = options.headless;
 	headless_status_interval = options.status_interval;
 	headless_boot_profile = options.boot_profile;
+	headless_screenshot_path = options.screenshot;
 	cpu_trace_enable = options.trace;
 
 	// Create core and initialise
@@ -1217,6 +1239,10 @@ int main(int argc, char** argv, char** env) {
 	blockdevice.MountDisk(options.profile_image, 0);
 
 	if (options.headless) {
+		if (!headless_screenshot_path.empty() && video.InitialiseHeadless() != 0) {
+			fprintf(stderr, "headless: failed to initialise screenshot framebuffer\n");
+			return 1;
+		}
 		RunHeadless(options.cycles);
 		return 0;
 	}

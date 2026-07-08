@@ -76,7 +76,6 @@ void SimBlockDevice::BeforeEval(int cycles)
          *sd_buff_dout = (high << 8) | low;
          *sd_buff_addr = bytecnt++;
          *sd_buff_wr= 1;
-         printf("cycles %x reading %X : %X ack %x\n",cycles,*sd_buff_addr,*sd_buff_dout,*sd_ack );
       } else if(writing && *sd_buff_addr != bytecnt && (*sd_buff_addr< 256)) {
         uint16_t val = *(sd_buff_din[i]);
         disk[i].put(val & 0xFF);
@@ -110,7 +109,7 @@ fprintf(stderr,"mounting.. %d\n",i);
            mountQueue[i]=0;
            *img_size = disk_size[i];
 	   *img_readonly=0;
-fprintf(stderr,"img_size .. %ld\n",*img_size);
+	fprintf(stderr,"img_size .. %llu\n",(unsigned long long)*img_size);
            disk[i].seekg(0);
            bitset(*img_mounted,i);
            ack_delay=1200;
@@ -118,10 +117,11 @@ fprintf(stderr,"img_size .. %ld\n",*img_size);
 fprintf(stderr,"mounting flag cleared  %d\n",i);
         bitclear(*img_mounted,i) ;
         //*img_size = 0;
-    } else { if (!reading && !writing && ack_delay>0) ack_delay--; }
+    } else { if (!reading && !writing && ack_delay>0 && current_disk != i) ack_delay--; }
 
     // start reading when sd_rd pulses high
-    if ((current_disk==-1 || current_disk==i) && (bitcheck(*sd_rd,i) || bitcheck(*sd_wr,i) )) {
+    bool request_active = (bitcheck(*sd_rd,i) || bitcheck(*sd_wr,i));
+    if ((current_disk==-1 || current_disk==i) && request_active) {
        // set current disk here..
 //fprintf(stderr,"setting current disk %d %x ack_delay %x\n",i,*sd_rd,ack_delay);
        current_disk=i;
@@ -144,14 +144,16 @@ fprintf(stderr,"mounting flag cleared  %d\n",i);
     }
 
     if (current_disk == i) {
-      if (ack_delay==1) {
+      if (ack_delay==1 && !reading && !writing) {
            bitset(*sd_ack,i);
-	   //printf("setting sd_ack: %x\n",*sd_ack);
+		   //printf("setting sd_ack: %x\n",*sd_ack);
       } else {
            bitclear(*sd_ack,i);
 	   //printf("clearing sd_ack: %x\n",*sd_ack);
       }
-      if((ack_delay > 1) || ((ack_delay == 1) && !reading && !writing))
+      if (ack_delay > 1)
+        ack_delay--;
+      else if (ack_delay == 1 && !reading && !writing && !request_active)
         ack_delay--;
       if (ack_delay==0 && !reading && !writing) 
 	current_disk=-1;

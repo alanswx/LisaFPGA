@@ -2,6 +2,7 @@
 #include "sim_video.h"
 
 #include <string>
+#include <cstring>
 
 #ifndef _MSC_VER
 #include "imgui_impl_sdl.h"
@@ -203,6 +204,45 @@ SimVideo::SimVideo(int width, int height, int rotate)
 SimVideo::~SimVideo()
 {
 
+}
+
+int SimVideo::InitialiseHeadless()
+{
+	output_ptr = (uint32_t*)malloc(output_size);
+	if (output_ptr == NULL) {
+		return 1;
+	}
+	memset(output_ptr, 0xAA, output_size);
+	return 0;
+}
+
+bool SimVideo::SavePPM(const char* path)
+{
+	if (output_ptr == NULL) {
+		return false;
+	}
+
+	FILE* out = fopen(path, "wb");
+	if (out == NULL) {
+		return false;
+	}
+
+	fprintf(out, "P6\n%d %d\n255\n", output_width, output_height);
+	for (int y = 0; y < output_height; y++) {
+		for (int x = 0; x < output_width; x++) {
+			uint32_t pixel = output_ptr[(y * output_width) + x];
+			unsigned char rgb[3] = {
+				(unsigned char)(pixel & 0xff),
+				(unsigned char)((pixel >> 8) & 0xff),
+				(unsigned char)((pixel >> 16) & 0xff),
+			};
+			fwrite(rgb, 1, sizeof(rgb), out);
+		}
+	}
+
+	bool ok = ferror(out) == 0;
+	fclose(out);
+	return ok;
 }
 
 int SimVideo::Initialise(const char* windowTitle) {

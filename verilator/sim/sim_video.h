@@ -41,4 +41,6 @@ public:
 	void StartFrame();
 	void Clock(bool hblank, bool vblank, bool hsync, bool vsync, uint32_t colour);
 	int Initialise(const char* windowTitle);
+	int InitialiseHeadless();
+	bool SavePPM(const char* path);
 };

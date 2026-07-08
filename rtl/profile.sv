@@ -1,7 +1,7 @@
 // profile.sv
 // Apple ProFile Parallel Port Hard Disk Drive Emulator for MiSTer FPGA
 //
-// Translates 532-byte ProFile blocks to/from 512-byte SD card sectors using a 2-sector cache.
+// Translates 532-byte ProFile blocks to/from 512-byte SD card sectors using a 3-sector cache.
 // Handles ProFile parallel protocol handshaking with command decoding and status bytes.
 
 `timescale 1 ps / 1 ps
@@ -32,7 +32,7 @@ module profile (
     input  wire [15:0] sd_buff_dout,    // Data from HPS to FPGA
     output wire [15:0] sd_buff_din,     // Data from FPGA to HPS
     input  wire        sd_buff_wr,      // Buffer write enable from HPS
-    input  wire        img_mounted      // DEBUG: is a disk image mounted
+    input  wire        img_mounted      // Disk image mounted
 );
 
     // Tri-state buffer control for parallel data bus
@@ -47,17 +47,17 @@ module profile (
         _PARITY = ^pd_out;
     end
 
-    // 2-Sector cache (1024 bytes BRAM)
-    reg [7:0] cache_data[1024];
-    reg [31:0] cache_sec0_tag, cache_sec1_tag;
-    reg        cache_sec0_valid, cache_sec1_valid;
-    reg        cache_sec0_dirty, cache_sec1_dirty;
+    // 3-sector cache. A 532-byte ProFile block can span three 512-byte host sectors.
+    reg [7:0] cache_data[2048];
+    reg [31:0] cache_sec0_tag, cache_sec1_tag, cache_sec2_tag;
+    reg        cache_sec0_valid, cache_sec1_valid, cache_sec2_valid;
+    reg        cache_sec0_dirty, cache_sec1_dirty, cache_sec2_dirty;
 
     // SD Card Interface data mapping (FPGA -> HPS)
-    reg active_slot; // 0 = sector 0 (low 512 bytes), 1 = sector 1 (high 512 bytes)
-    assign sd_buff_din = (active_slot == 1'b0) ? 
-        {cache_data[{1'b0, sd_buff_addr, 1'b1}], cache_data[{1'b0, sd_buff_addr, 1'b0}]} :
-        {cache_data[{1'b1, sd_buff_addr, 1'b1}], cache_data[{1'b1, sd_buff_addr, 1'b0}]};
+    reg [1:0] active_slot;
+    assign sd_buff_din =
+        {cache_data[{active_slot, sd_buff_addr, 1'b1}],
+         cache_data[{active_slot, sd_buff_addr, 1'b0}]};
 
     // Buffer writes from HPS to Cache BRAM
     // (Moved to the main always_ff block below to prevent multiple constant drivers)
@@ -67,15 +67,18 @@ module profile (
     reg [2:0] cmd_idx;
     reg [23:0] block_num;
     reg [31:0] byte_addr;
-    reg [31:0] sec_A, sec_B;
+    reg [31:0] sec_A, sec_B, sec_C;
     reg [8:0]  block_offset;
+    reg [10:0] block_end_offset;
 
     // Shift-and-add multiplication: block_num * 532
     always_comb begin
         byte_addr = (block_num << 9) + (block_num << 4) + (block_num << 2);
         sec_A = byte_addr >> 9;
-        sec_B = (byte_addr + 531) >> 9;
+        sec_B = (byte_addr >> 9) + 32'd1;
+        sec_C = (byte_addr >> 9) + 32'd2;
         block_offset = byte_addr & 9'h1FF;
+        block_end_offset = {2'b00, byte_addr[8:0]} + 11'd531;
     end
 
     // Edges detection for handshaking signals
@@ -105,6 +108,7 @@ module profile (
         ST_READ_CONFIRM_1,
         ST_READ_CACHE_A,
         ST_READ_CACHE_B,
+        ST_READ_CACHE_C,
         ST_READ_DATA_0,
         ST_READ_DATA_1,
         ST_READ_DATA_2,
@@ -112,10 +116,12 @@ module profile (
         ST_WRITE_CONFIRM_1,
         ST_WRITE_CACHE_A,
         ST_WRITE_CACHE_B,
+        ST_WRITE_CACHE_C,
         ST_WRITE_DATA_0,
         ST_WRITE_DATA_1,
         ST_WRITE_FLUSH_A,
         ST_WRITE_FLUSH_B,
+        ST_WRITE_FLUSH_C,
         ST_WRITE_DONE_0,
         ST_WRITE_DONE_1,
         ST_HPS_READ,
@@ -137,20 +143,17 @@ module profile (
     reg       is_spare_read;
     reg       host_ack_seen;
 
-    // Cache hit lookup helper logic
-    wire cache_sec0_hit_A = cache_sec0_valid && (cache_sec0_tag == sec_A);
-    wire cache_sec1_hit_A = cache_sec1_valid && (cache_sec1_tag == sec_A);
-    wire cache_sec0_hit_B = cache_sec0_valid && (cache_sec0_tag == sec_B);
-    wire cache_sec1_hit_B = cache_sec1_valid && (cache_sec1_tag == sec_B);
-
-    wire hit_A = cache_sec0_hit_A || cache_sec1_hit_A;
-    wire hit_B = cache_sec0_hit_B || cache_sec1_hit_B;
-
-    wire [1'b0:1'b0] slot_A = cache_sec1_hit_A;
-    wire [1'b0:1'b0] slot_B = cache_sec1_hit_B;
+    // Cache hit lookup helper logic. Slots are fixed for the active ProFile block:
+    // slot 0 = first host sector, slot 1 = second, slot 2 = optional third.
+    wire need_C = (block_end_offset >= 11'd1024);
+    wire hit_A = cache_sec0_valid && (cache_sec0_tag == sec_A);
+    wire hit_B = cache_sec1_valid && (cache_sec1_tag == sec_B);
+    wire hit_C = !need_C || (cache_sec2_valid && (cache_sec2_tag == sec_C));
+    wire [10:0] data_rel_addr = {2'b00, block_offset} + ({1'b0, data_idx} - 11'd4);
+    wire [10:0] write_rel_addr = {2'b00, block_offset} + {1'b0, data_idx};
 
     // Address translation function for cache BRAM read
-    function automatic [9:0] get_cache_addr(input [1:0] dummy, input slot, input [8:0] offset);
+    function automatic [10:0] get_cache_addr(input [1:0] slot, input [8:0] offset);
         return {slot, offset};
     endfunction
 
@@ -158,13 +161,8 @@ module profile (
     always_ff @(posedge clk) begin
         // Buffer writes from HPS to Cache BRAM
         if (sd_buff_wr) begin
-            if (active_slot == 1'b0) begin
-                cache_data[{1'b0, sd_buff_addr, 1'b0}] <= sd_buff_dout[7:0];
-                cache_data[{1'b0, sd_buff_addr, 1'b1}] <= sd_buff_dout[15:8];
-            end else begin
-                cache_data[{1'b1, sd_buff_addr, 1'b0}] <= sd_buff_dout[7:0];
-                cache_data[{1'b1, sd_buff_addr, 1'b1}] <= sd_buff_dout[15:8];
-            end
+            cache_data[{active_slot, sd_buff_addr, 1'b0}] <= sd_buff_dout[7:0];
+            cache_data[{active_slot, sd_buff_addr, 1'b1}] <= sd_buff_dout[15:8];
         end
 
         if (reset || _PRES == 0) begin
@@ -175,8 +173,10 @@ module profile (
             sd_wr <= 1'b0;
             cache_sec0_valid <= 0;
             cache_sec1_valid <= 0;
+            cache_sec2_valid <= 0;
             cache_sec0_dirty <= 0;
             cache_sec1_dirty <= 0;
+            cache_sec2_dirty <= 0;
             host_ack_seen <= 1'b0;
         end else begin
             case (state)
@@ -301,14 +301,14 @@ module profile (
                     if (hit_A) begin
                         state <= ST_READ_CACHE_B;
                     end else begin
-                        // Cache miss on sec_A. Choose replacement slot (LRU or simple flip)
-                        active_slot <= 1'b0;
-                        sd_lba <= sec_A;
+                        active_slot <= 2'd0;
                         if (cache_sec0_valid && cache_sec0_dirty) begin
                             // Must flush dirty sector first
+                            sd_lba <= cache_sec0_tag;
                             state <= ST_HPS_WRITE;
                             return_state <= ST_READ_CACHE_A;
                         end else begin
+                            sd_lba <= sec_A;
                             state <= ST_HPS_READ;
                             return_state <= ST_READ_CACHE_A;
                         end
@@ -317,18 +317,35 @@ module profile (
 
                 ST_READ_CACHE_B: begin
                     if (hit_B) begin
-                        state <= ST_READ_DATA_0;
+                        state <= ST_READ_CACHE_C;
                     end else begin
-                        // Cache miss on sec_B. Put it in slot 1
-                        active_slot <= 1'b1;
-                        sd_lba <= sec_B;
+                        active_slot <= 2'd1;
                         if (cache_sec1_valid && cache_sec1_dirty) begin
                             // Must flush dirty sector first
+                            sd_lba <= cache_sec1_tag;
                             state <= ST_HPS_WRITE;
                             return_state <= ST_READ_CACHE_B;
                         end else begin
+                            sd_lba <= sec_B;
                             state <= ST_HPS_READ;
                             return_state <= ST_READ_CACHE_B;
+                        end
+                    end
+                end
+
+                ST_READ_CACHE_C: begin
+                    if (hit_C) begin
+                        state <= ST_READ_DATA_0;
+                    end else begin
+                        active_slot <= 2'd2;
+                        if (cache_sec2_valid && cache_sec2_dirty) begin
+                            sd_lba <= cache_sec2_tag;
+                            state <= ST_HPS_WRITE;
+                            return_state <= ST_READ_CACHE_C;
+                        end else begin
+                            sd_lba <= sec_C;
+                            state <= ST_HPS_READ;
+                            return_state <= ST_READ_CACHE_C;
                         end
                     end
                 end
@@ -350,10 +367,12 @@ module profile (
                         end else begin
                             // Read from sector cache BRAM
                             // Sector offset calculation
-                            if (block_offset + (data_idx - 4) < 512) begin
-                                pd_out <= cache_data[get_cache_addr(2'b00, slot_A, block_offset + (data_idx - 4))];
+                            if (data_rel_addr < 11'd512) begin
+                                pd_out <= cache_data[get_cache_addr(2'd0, data_rel_addr[8:0])];
+                            end else if (data_rel_addr < 11'd1024) begin
+                                pd_out <= cache_data[get_cache_addr(2'd1, data_rel_addr[8:0])];
                             end else begin
-                                pd_out <= cache_data[get_cache_addr(2'b00, slot_B, block_offset + (data_idx - 4) - 512)];
+                                pd_out <= cache_data[get_cache_addr(2'd2, data_rel_addr[8:0])];
                             end
                         end
                     end
@@ -405,12 +424,13 @@ module profile (
                     if (hit_A) begin
                         state <= ST_WRITE_CACHE_B;
                     end else begin
-                        active_slot <= 1'b0;
-                        sd_lba <= sec_A;
+                        active_slot <= 2'd0;
                         if (cache_sec0_valid && cache_sec0_dirty) begin
+                            sd_lba <= cache_sec0_tag;
                             state <= ST_HPS_WRITE;
                             return_state <= ST_WRITE_CACHE_A;
                         end else begin
+                            sd_lba <= sec_A;
                             state <= ST_HPS_READ;
                             return_state <= ST_WRITE_CACHE_A;
                         end
@@ -419,16 +439,34 @@ module profile (
 
                 ST_WRITE_CACHE_B: begin
                     if (hit_B) begin
-                        state <= ST_WRITE_DATA_0;
+                        state <= ST_WRITE_CACHE_C;
                     end else begin
-                        active_slot <= 1'b1;
-                        sd_lba <= sec_B;
+                        active_slot <= 2'd1;
                         if (cache_sec1_valid && cache_sec1_dirty) begin
+                            sd_lba <= cache_sec1_tag;
                             state <= ST_HPS_WRITE;
                             return_state <= ST_WRITE_CACHE_B;
                         end else begin
+                            sd_lba <= sec_B;
                             state <= ST_HPS_READ;
                             return_state <= ST_WRITE_CACHE_B;
+                        end
+                    end
+                end
+
+                ST_WRITE_CACHE_C: begin
+                    if (hit_C) begin
+                        state <= ST_WRITE_DATA_0;
+                    end else begin
+                        active_slot <= 2'd2;
+                        if (cache_sec2_valid && cache_sec2_dirty) begin
+                            sd_lba <= cache_sec2_tag;
+                            state <= ST_HPS_WRITE;
+                            return_state <= ST_WRITE_CACHE_C;
+                        end else begin
+                            sd_lba <= sec_C;
+                            state <= ST_HPS_READ;
+                            return_state <= ST_WRITE_CACHE_C;
                         end
                     end
                 end
@@ -443,18 +481,19 @@ module profile (
                     if (_CMD == 0) begin
                         // Host pulled CMD low; finished receiving 532 bytes
                         // Mark cached sectors dirty
-                        if (cache_sec0_hit_A) cache_sec0_dirty <= 1'b1;
-                        if (cache_sec1_hit_A) cache_sec1_dirty <= 1'b1;
-                        if (cache_sec0_hit_B) cache_sec0_dirty <= 1'b1;
-                        if (cache_sec1_hit_B) cache_sec1_dirty <= 1'b1;
+                        cache_sec0_dirty <= 1'b1;
+                        cache_sec1_dirty <= 1'b1;
+                        if (need_C) cache_sec2_dirty <= 1'b1;
 
                         state <= ST_WRITE_FLUSH_A;
                     end else if (pstrb_falling) begin
                         // Save received byte into Cache BRAM
-                        if (block_offset + data_idx < 512) begin
-                            cache_data[get_cache_addr(2'b00, slot_A, block_offset + data_idx)] <= pd_in;
+                        if (write_rel_addr < 11'd512) begin
+                            cache_data[get_cache_addr(2'd0, write_rel_addr[8:0])] <= pd_in;
+                        end else if (write_rel_addr < 11'd1024) begin
+                            cache_data[get_cache_addr(2'd1, write_rel_addr[8:0])] <= pd_in;
                         end else begin
-                            cache_data[get_cache_addr(2'b00, slot_B, block_offset + data_idx - 512)] <= pd_in;
+                            cache_data[get_cache_addr(2'd2, write_rel_addr[8:0])] <= pd_in;
                         end
                         data_idx <= data_idx + 1'b1;
                     end
@@ -462,8 +501,8 @@ module profile (
 
                 // Write-back flush to SD card
                 ST_WRITE_FLUSH_A: begin
-                    if (cache_sec0_valid && cache_sec0_dirty && (cache_sec0_tag == sec_A || cache_sec0_tag == sec_B)) begin
-                        active_slot <= 1'b0;
+                    if (cache_sec0_valid && cache_sec0_dirty && cache_sec0_tag == sec_A) begin
+                        active_slot <= 2'd0;
                         sd_lba <= cache_sec0_tag;
                         state <= ST_HPS_WRITE;
                         return_state <= ST_WRITE_FLUSH_B;
@@ -473,9 +512,20 @@ module profile (
                 end
 
                 ST_WRITE_FLUSH_B: begin
-                    if (cache_sec1_valid && cache_sec1_dirty && (cache_sec1_tag == sec_A || cache_sec1_tag == sec_B)) begin
-                        active_slot <= 1'b1;
+                    if (cache_sec1_valid && cache_sec1_dirty && cache_sec1_tag == sec_B) begin
+                        active_slot <= 2'd1;
                         sd_lba <= cache_sec1_tag;
+                        state <= ST_HPS_WRITE;
+                        return_state <= ST_WRITE_FLUSH_C;
+                    end else begin
+                        state <= ST_WRITE_FLUSH_C;
+                    end
+                end
+
+                ST_WRITE_FLUSH_C: begin
+                    if (need_C && cache_sec2_valid && cache_sec2_dirty && cache_sec2_tag == sec_C) begin
+                        active_slot <= 2'd2;
+                        sd_lba <= cache_sec2_tag;
                         state <= ST_HPS_WRITE;
                         return_state <= ST_WRITE_DONE_0;
                     end else begin
@@ -517,14 +567,18 @@ module profile (
                     sd_rd <= 1'b1;
                     if (sd_ack) begin
                         sd_rd <= 1'b0;
-                        if (active_slot == 1'b0) begin
+                        if (active_slot == 2'd0) begin
                             cache_sec0_tag <= sd_lba;
                             cache_sec0_valid <= 1'b1;
                             cache_sec0_dirty <= 1'b0;
-                        end else begin
+                        end else if (active_slot == 2'd1) begin
                             cache_sec1_tag <= sd_lba;
                             cache_sec1_valid <= 1'b1;
                             cache_sec1_dirty <= 1'b0;
+                        end else begin
+                            cache_sec2_tag <= sd_lba;
+                            cache_sec2_valid <= 1'b1;
+                            cache_sec2_dirty <= 1'b0;
                         end
                         state <= return_state;
                     end
@@ -534,11 +588,13 @@ module profile (
                     sd_wr <= 1'b1;
                     if (sd_ack) begin
                         sd_wr <= 1'b0;
-                        if (active_slot == 1'b0) begin
+                        if (active_slot == 2'd0) begin
                             cache_sec0_dirty <= 1'b0;
-                        end else begin
+                        end else if (active_slot == 2'd1) begin
                             cache_sec1_dirty <= 1'b0;
-                        end
+                        end else begin
+	                            cache_sec2_dirty <= 1'b0;
+	                        end
                         state <= return_state;
                     end
                 end
@@ -555,7 +611,7 @@ module profile (
         end
     end
 
-    // DEBUG (bring-up ISSP "LPRO", remove for release): trace the ProFile boot.
+    // Simulator-visible counters for ProFile bring-up/status output.
     //  state       = current FSM state
     //  max_state   = furthest state reached (how far the boot handshake got)
     //  cmd0        = commandBuffer[0] (00=read, 01/02/03=write)
@@ -569,10 +625,7 @@ module profile (
     reg [7:0] strb_edges /*verilator public_flat_rd*/ = 0;
     reg [7:0] rd_acks /*verilator public_flat_rd*/ = 0;
     reg cmd_d = 1, strb_d = 1, rd_ack_d = 0;
-    // DEBUG: when a _CMD falling edge arrives while the FSM is held in reset
-    // (the failing case: the Lisa commands us while (reset || _PRES==0) is true),
-    // latch WHICH reset source was active so we know whether it's the core reset
-    // or _PRES/_CRES holding us off. cmd_in_rst counts these missed commands.
+    // Latch reset state if a command edge arrives while the FSM is held in reset.
     reg rst_at_cmd /*verilator public_flat_rd*/ = 0;
     reg pres_at_cmd /*verilator public_flat_rd*/ = 1;
     reg [3:0] cmd_in_rst /*verilator public_flat_rd*/ = 0;
@@ -588,17 +641,4 @@ module profile (
             cmd_in_rst  <= cmd_in_rst + 4'd1;
         end
     end
-    `ifndef SIMULATION
-    altsource_probe #(
-        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
-        .instance_id ("LPRO"), .probe_width (64), .source_width (1),
-        .source_initial_value ("0"), .enable_metastability ("NO")
-    ) u_pro_probe ( .source(), .probe({
-        state, max_state, commandBuffer[0], block_num[11:0],
-        cmd_edges, strb_edges, rd_acks,
-        img_mounted, _PRES, _CMD, _PSTRB, _BSY, R_W, sd_rd, sd_wr,
-        rst_at_cmd, pres_at_cmd
-    }), .source_clk(clk), .source_ena(1'b1) );
-    `endif
-
 endmodule
