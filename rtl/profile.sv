@@ -88,6 +88,8 @@ module profile (
     wire pstrb_falling = (_PSTRB == 0 && pstrb_last == 1);
     wire pstrb_rising  = (_PSTRB == 1 && pstrb_last == 0);
     wire cmd_falling   = (_CMD == 0 && cmd_last == 1);
+    wire host_ack_value = (R_W == 0 && pd_in == 8'h55);
+    wire host_ack       = (_CMD == 0 && host_ack_value);
     wire cmd_rising    = (_CMD == 1 && cmd_last == 0);
 
     // Main Emulator FSM States
@@ -133,6 +135,7 @@ module profile (
     reg [9:0] data_idx; // up to 536 bytes
     reg [7:0] temp_data;
     reg       is_spare_read;
+    reg       host_ack_seen;
 
     // Cache hit lookup helper logic
     wire cache_sec0_hit_A = cache_sec0_valid && (cache_sec0_tag == sec_A);
@@ -174,6 +177,7 @@ module profile (
             cache_sec1_valid <= 0;
             cache_sec0_dirty <= 0;
             cache_sec1_dirty <= 0;
+            host_ack_seen <= 1'b0;
         end else begin
             case (state)
                 ST_RESET: begin
@@ -181,12 +185,14 @@ module profile (
                     pd_oe <= 1'b0;
                     sd_rd <= 1'b0;
                     sd_wr <= 1'b0;
+                    host_ack_seen <= 1'b0;
                     state <= ST_IDLE;
                 end
 
                 ST_IDLE: begin
                     _BSY <= 1'b1;
                     pd_oe <= 1'b0;
+                    host_ack_seen <= 1'b0;
                     // The Lisa can assert _CMD while _PRES is still low during
                     // boot. A real ESProFile sees the line after reset releases;
                     // do the same instead of requiring a new falling edge.
@@ -199,15 +205,28 @@ module profile (
                     pd_oe <= 1'b1;
                     pd_out <= 8'h01; // Drive 0x01 on bus
                     _BSY <= 1'b0;    // Acknowledge by pulling BSY low
+                    if (host_ack) begin
+                        host_ack_seen <= 1'b1;
+                    end
                     if (_CMD == 1) begin
-                        state <= ST_HANDSHAKE_1;
+                        if (host_ack_seen || host_ack_value) begin
+                            host_ack_seen <= 1'b0;
+                            state <= ST_CMD_RECV_0;
+                        end else begin
+                            host_ack_seen <= 1'b0;
+                            state <= ST_IDLE;
+                        end
                     end
                 end
 
                 ST_HANDSHAKE_1: begin
                     pd_oe <= 1'b0; // Set to input
-                    if (pstrb_falling && pd_in == 8'h55) begin
+                    if (host_ack) begin
+                        host_ack_seen <= 1'b0;
                         state <= ST_CMD_RECV_0;
+                    end else if (_CMD == 1) begin
+                        host_ack_seen <= 1'b0;
+                        state <= ST_IDLE;
                     end
                 end
 
@@ -244,19 +263,36 @@ module profile (
                     pd_oe <= 1'b1;
                     pd_out <= 8'h02; // Read confirmation
                     _BSY <= 1'b0;
+                    if (host_ack) begin
+                        host_ack_seen <= 1'b1;
+                    end
                     if (_CMD == 1) begin
-                        state <= ST_READ_CONFIRM_1;
+                        if (host_ack_seen || host_ack_value) begin
+                            host_ack_seen <= 1'b0;
+                            if (is_spare_read) begin
+                                state <= ST_READ_DATA_0;
+                            end else begin
+                                state <= ST_READ_CACHE_A;
+                            end
+                        end else begin
+                            host_ack_seen <= 1'b0;
+                            state <= ST_IDLE;
+                        end
                     end
                 end
 
                 ST_READ_CONFIRM_1: begin
                     pd_oe <= 1'b0; // Set to input
-                    if (pstrb_falling && pd_in == 8'h55) begin
+                    if (host_ack) begin
+                        host_ack_seen <= 1'b0;
                         if (is_spare_read) begin
                             state <= ST_READ_DATA_0;
                         end else begin
                             state <= ST_READ_CACHE_A;
                         end
+                    end else if (_CMD == 1) begin
+                        host_ack_seen <= 1'b0;
+                        state <= ST_IDLE;
                     end
                 end
 
@@ -339,15 +375,28 @@ module profile (
                     pd_oe <= 1'b1;
                     pd_out <= commandBuffer[0] + 8'h02; // Write response
                     _BSY <= 1'b0;
+                    if (host_ack) begin
+                        host_ack_seen <= 1'b1;
+                    end
                     if (_CMD == 1) begin
-                        state <= ST_WRITE_CONFIRM_1;
+                        if (host_ack_seen || host_ack_value) begin
+                            host_ack_seen <= 1'b0;
+                            state <= ST_WRITE_CACHE_A;
+                        end else begin
+                            host_ack_seen <= 1'b0;
+                            state <= ST_IDLE;
+                        end
                     end
                 end
 
                 ST_WRITE_CONFIRM_1: begin
                     pd_oe <= 1'b0;
-                    if (pstrb_falling && pd_in == 8'h55) begin
+                    if (host_ack) begin
+                        host_ack_seen <= 1'b0;
                         state <= ST_WRITE_CACHE_A;
+                    end else if (_CMD == 1) begin
+                        host_ack_seen <= 1'b0;
+                        state <= ST_IDLE;
                     end
                 end
 
@@ -438,14 +487,27 @@ module profile (
                     pd_oe <= 1'b1;
                     pd_out <= 8'h06; // Write completed OK
                     _BSY <= 1'b0;
+                    if (host_ack) begin
+                        host_ack_seen <= 1'b1;
+                    end
                     if (_CMD == 1) begin
-                        state <= ST_WRITE_DONE_1;
+                        if (host_ack_seen || host_ack_value) begin
+                            host_ack_seen <= 1'b0;
+                            state <= ST_IDLE;
+                        end else begin
+                            host_ack_seen <= 1'b0;
+                            state <= ST_IDLE;
+                        end
                     end
                 end
 
                 ST_WRITE_DONE_1: begin
                     pd_oe <= 1'b0;
-                    if (pstrb_falling && pd_in == 8'h55) begin
+                    if (host_ack) begin
+                        host_ack_seen <= 1'b0;
+                        state <= ST_IDLE;
+                    end else if (_CMD == 1) begin
+                        host_ack_seen <= 1'b0;
                         state <= ST_IDLE;
                     end
                 end

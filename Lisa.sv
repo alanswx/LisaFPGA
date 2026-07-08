@@ -774,13 +774,14 @@ module emu (
     wire       _STRB_esprofile;
     wire       _PRES_esprofile;
     wire       _PARITY_esprofile;
-    // Explicit ProFile data bus (was a shared tri-state net): the profile
-    // emulator drives when pd_oe, otherwise the Lisa side's value (FF = idle
-    // pull-up emulated inside top) is on the bus.
+    // Explicit ProFile data bus (was a shared tri-state net). Lisa reads see
+    // the profile emulator when it drives; profile command replies see the
+    // Lisa's Port A output while R_W is low.
     wire [7:0] pd_top_out;
     wire [7:0] profile_pd_out;
     wire       profile_pd_oe;
-    wire [7:0] pd_esprofile = profile_pd_oe ? profile_pd_out : pd_top_out;
+    wire [7:0] pd_to_lisa = profile_pd_oe ? profile_pd_out : pd_top_out;
+    wire [7:0] pd_to_profile = !R_W_esprofile ? pd_top_out : pd_to_lisa;
 
     profile profile_i (
         .clk(clk_sys),
@@ -793,7 +794,7 @@ module emu (
         .R_W(R_W_esprofile),
         ._BSY(_BSY_esprofile),
         ._PARITY(_PARITY_esprofile),
-        .PD_i(pd_esprofile),
+        .PD_i(pd_to_profile),
         .PD_o(profile_pd_out),
         .PD_oe_o(profile_pd_oe),
 
@@ -893,8 +894,8 @@ module emu (
         ._STRB_ESPROFILE(_STRB_esprofile),
         ._PRES_ESPROFILE(_PRES_esprofile),
         ._PARITY_ESPROFILE(_PARITY_esprofile),
-        .OCD_ESPROFILE(1'b1), // Parity check OK
-        .PD_ESPROFILE_in(pd_esprofile),
+        .OCD_ESPROFILE(1'b0), // OCD is active low: internal ESProFile is present
+        .PD_ESPROFILE_in(pd_to_lisa),
         .PD_ESPROFILE_out(pd_top_out),
 
         ._CMD_EXTPROFILE(),

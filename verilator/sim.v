@@ -166,7 +166,8 @@ module emu (
     wire [7:0] pd_top_out;
     wire [7:0] profile_pd_out;
     wire       profile_pd_oe;
-    wire [7:0] pd_esprofile = profile_pd_oe ? profile_pd_out : pd_top_out;
+    wire [7:0] pd_to_lisa = profile_pd_oe ? profile_pd_out : pd_top_out;
+    wire [7:0] pd_to_profile = !R_W_esprofile ? pd_top_out : pd_to_lisa;
 
     wire profile_sd_rd;
     wire profile_sd_wr;
@@ -186,7 +187,7 @@ module emu (
         .R_W(R_W_esprofile),
         ._BSY(_BSY_esprofile),
         ._PARITY(_PARITY_esprofile),
-        .PD_i(pd_esprofile),
+        .PD_i(pd_to_profile),
         .PD_o(profile_pd_out),
         .PD_oe_o(profile_pd_oe),
 
@@ -293,8 +294,8 @@ module emu (
         ._STRB_ESPROFILE(_STRB_esprofile),
         ._PRES_ESPROFILE(_PRES_esprofile),
         ._PARITY_ESPROFILE(_PARITY_esprofile),
-        .OCD_ESPROFILE(1'b1),
-        .PD_ESPROFILE_in(pd_esprofile),
+        .OCD_ESPROFILE(1'b0), // OCD is active low: internal ESProFile is present
+        .PD_ESPROFILE_in(pd_to_lisa),
         .PD_ESPROFILE_out(pd_top_out),
 
         ._CMD_EXTPROFILE(),

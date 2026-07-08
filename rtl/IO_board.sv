@@ -1260,7 +1260,7 @@ module IO_board(
 
     `ifdef SIMULATION
     logic [5:0] sim_cop_byte_idx /*verilator public_flat_rd*/ = 6'd0;
-    logic [1:0] sim_cop_seq_kind = 2'd0; // 1=keyboard reset, 2=ROM COP command 0x02, 3=injected key
+    logic [1:0] sim_cop_seq_kind = 2'd0; // 1=keyboard reset, 2=clock response, 3=injected key
     logic [7:0] sim_cop_key_inject /*verilator public_flat_rw*/ = 8'h00;
     logic sim_cop_power_seen = 1'b0;
     logic sim_cop_started = 1'b0;
@@ -1318,7 +1318,7 @@ module IO_board(
                 if (KBD_via_DDRA == 8'hff && !sim_cop_cmd_active) begin
                     sim_cop_cmd_active <= 1'b1;
                     _READY_COP <= 1'b1;
-                    if ((sim_cop_cmd_pending || sim_cop_byte_idx >= 3'd2) &&
+                    if ((sim_cop_cmd_pending || L_COP_out_int == 8'h02) &&
                         sim_cop_seq_kind == 2'd0 && !DATA_QUEUED_COP && sim_cop_gap_cnt == 20'd0) begin
                         sim_cop_seq_kind <= 2'd2;
                         sim_cop_byte_idx <= 6'd0;
@@ -1363,9 +1363,9 @@ module IO_board(
                     sim_cop_gap_cnt <= sim_cop_gap_cnt - 1'b1;
                     sim_cop_hold_cnt <= 12'd0;
                     if (sim_cop_gap_cnt == 20'd1 && sim_cop_send_pending) begin
-                        if (sim_cop_seq_kind == 2'd2 && (sim_cop_byte_idx[2:0] == 3'd0)) begin
+                        if (sim_cop_seq_kind == 2'd2 && sim_cop_byte_idx == 6'd0) begin
                             L_COP_in <= 8'h80;
-                        end else if (sim_cop_seq_kind == 2'd2 && (sim_cop_byte_idx[2:0] == 3'd1)) begin
+                        end else if (sim_cop_seq_kind == 2'd2 && sim_cop_byte_idx == 6'd1) begin
                             L_COP_in <= 8'he0;
                         end else if (sim_cop_byte_idx == 6'd0) begin
                             L_COP_in <= 8'h80;
@@ -1383,7 +1383,7 @@ module IO_board(
                     sim_cop_byte_idx <= sim_cop_byte_idx + 1'b1;
                     sim_cop_hold_cnt <= 12'd0;
                     if ((sim_cop_seq_kind == 2'd1 && sim_cop_byte_idx == 6'd0) ||
-                        (sim_cop_seq_kind == 2'd2 && sim_cop_byte_idx < 6'd63)) begin
+                        (sim_cop_seq_kind == 2'd2 && sim_cop_byte_idx < 6'd6)) begin
                         sim_cop_send_pending <= 1'b1;
                         sim_cop_gap_cnt <= 20'd64;
                     end else begin
