@@ -48,16 +48,23 @@ module profile (
     end
 
     // 3-sector cache. A 532-byte ProFile block can span three 512-byte host sectors.
-    reg [7:0] cache_data[2048];
+    // Split into even/odd byte lanes (word address = byte_addr[10:1], lane =
+    // byte_addr[0]) so BOTH the byte-addressed ProFile side and the 16-bit HPS
+    // side map to on-chip BRAM. A single byte array with an ASYNC 16-bit read
+    // (the old sd_buff_din) cannot infer as RAM and was synthesized as ~16K
+    // registers, blowing the design past the device's ALM capacity.
+    // Cache storage lives in two explicit MLAB LUT-RAM instances (lutram_1w1r,
+    // instantiated below). A plain byte array with the ProFile async read + the
+    // 16-bit HPS read would not infer as RAM and synthesized to ~16K registers,
+    // blowing the design past the device's ALM capacity. Even/odd byte lanes:
+    // word address = byte_addr[10:1], lane = byte_addr[0].
     reg [31:0] cache_sec0_tag, cache_sec1_tag, cache_sec2_tag;
     reg        cache_sec0_valid, cache_sec1_valid, cache_sec2_valid;
     reg        cache_sec0_dirty, cache_sec1_dirty, cache_sec2_dirty;
 
-    // SD Card Interface data mapping (FPGA -> HPS)
+    // FPGA -> HPS data (sd_buff_din) is driven from the single shared read port
+    // defined below (see cache_rd_word / even_q / odd_q).
     reg [1:0] active_slot;
-    assign sd_buff_din =
-        {cache_data[{active_slot, sd_buff_addr, 1'b1}],
-         cache_data[{active_slot, sd_buff_addr, 1'b0}]};
 
     // Buffer writes from HPS to Cache BRAM
     // (Moved to the main always_ff block below to prevent multiple constant drivers)
@@ -152,19 +159,54 @@ module profile (
     wire [10:0] data_rel_addr = {2'b00, block_offset} + ({1'b0, data_idx} - 11'd4);
     wire [10:0] write_rel_addr = {2'b00, block_offset} + {1'b0, data_idx};
 
-    // Address translation function for cache BRAM read
-    function automatic [10:0] get_cache_addr(input [1:0] slot, input [8:0] offset);
-        return {slot, offset};
+    // Cache word address (10-bit) from a slot + 9-bit byte offset (word = byte
+    // address >> 1); the even/odd lane is selected by the byte-address LSB.
+    function automatic [9:0] cache_word(input [1:0] slot, input [8:0] offset);
+        return {slot, offset[8:1]};
     endfunction
+
+    // --- ProFile-side byte addressing for the current read / write byte --------
+    wire [1:0] pf_rd_slot = (data_rel_addr  < 11'd512)  ? 2'd0 :
+                            (data_rel_addr  < 11'd1024) ? 2'd1 : 2'd2;
+    wire [9:0] pf_rd_word = cache_word(pf_rd_slot, data_rel_addr[8:0]);
+    wire       pf_rd_lane = data_rel_addr[0];
+    wire [1:0] pf_wr_slot = (write_rel_addr < 11'd512)  ? 2'd0 :
+                            (write_rel_addr < 11'd1024) ? 2'd1 : 2'd2;
+    wire [9:0] pf_wr_word = cache_word(pf_wr_slot, write_rel_addr[8:0]);
+    wire       pf_wr_lane = write_rel_addr[0];
+    wire       pf_wr_en   = (state == ST_WRITE_DATA_1) && _CMD && pstrb_falling;
+
+    // --- Single write port per lane (so the array maps to LUT-RAM, not ~16K
+    //     registers). The HPS sector load (sd_buff_wr) and the ProFile byte
+    //     writes are in disjoint FSM phases and never overlap, so each lane
+    //     collapses to one write port. Reads stay async (LUT-RAM). -------------
+    wire        even_we = sd_buff_wr | (pf_wr_en && !pf_wr_lane);
+    wire [9:0]  even_wa = sd_buff_wr ? {active_slot, sd_buff_addr} : pf_wr_word;
+    wire [7:0]  even_wd = sd_buff_wr ? sd_buff_dout[7:0]           : pd_in;
+    wire        odd_we  = sd_buff_wr | (pf_wr_en &&  pf_wr_lane);
+    wire [9:0]  odd_wa  = sd_buff_wr ? {active_slot, sd_buff_addr} : pf_wr_word;
+    wire [7:0]  odd_wd  = sd_buff_wr ? sd_buff_dout[15:8]          : pd_in;
+    // --- Single async read port per lane ---------------------------------------
+    // The HPS (sd_buff) view and the ProFile read view never read simultaneously
+    // (disjoint FSM phases), so ONE address mux feeds both — one read port per
+    // lane keeps each RAM to 1W+1R (no duplication).
+    wire [9:0] cache_rd_word = (state == ST_READ_DATA_1) ? pf_rd_word
+                                                         : {active_slot, sd_buff_addr};
+    wire [7:0] even_q, odd_q;
+
+    // Explicit MLAB LUT-RAM (async read) for each byte lane — forces the cache
+    // into on-chip RAM instead of registers.
+    lutram_1w1r #(.AW(10), .DW(8)) u_even_cache (
+        .clk(clk), .we(even_we), .waddr(even_wa), .wdata(even_wd),
+        .raddr(cache_rd_word), .rdata(even_q));
+    lutram_1w1r #(.AW(10), .DW(8)) u_odd_cache (
+        .clk(clk), .we(odd_we),  .waddr(odd_wa),  .wdata(odd_wd),
+        .raddr(cache_rd_word), .rdata(odd_q));
+
+    assign sd_buff_din = {odd_q, even_q};
 
     // Emulator FSM and Cache Logic
     always_ff @(posedge clk) begin
-        // Buffer writes from HPS to Cache BRAM
-        if (sd_buff_wr) begin
-            cache_data[{active_slot, sd_buff_addr, 1'b0}] <= sd_buff_dout[7:0];
-            cache_data[{active_slot, sd_buff_addr, 1'b1}] <= sd_buff_dout[15:8];
-        end
-
         if (reset || _PRES == 0) begin
             state <= ST_RESET;
             _BSY <= 1'b1;
@@ -365,15 +407,8 @@ module profile (
                         if (is_spare_read) begin
                             pd_out <= ((data_idx - 4) < 48) ? spareTable[data_idx - 4] : 8'hFF;
                         end else begin
-                            // Read from sector cache BRAM
-                            // Sector offset calculation
-                            if (data_rel_addr < 11'd512) begin
-                                pd_out <= cache_data[get_cache_addr(2'd0, data_rel_addr[8:0])];
-                            end else if (data_rel_addr < 11'd1024) begin
-                                pd_out <= cache_data[get_cache_addr(2'd1, data_rel_addr[8:0])];
-                            end else begin
-                                pd_out <= cache_data[get_cache_addr(2'd2, data_rel_addr[8:0])];
-                            end
+                            // Async LUT-RAM read of the selected lane (shared port).
+                            pd_out <= pf_rd_lane ? odd_q : even_q;
                         end
                     end
 
@@ -487,14 +522,9 @@ module profile (
 
                         state <= ST_WRITE_FLUSH_A;
                     end else if (pstrb_falling) begin
-                        // Save received byte into Cache BRAM
-                        if (write_rel_addr < 11'd512) begin
-                            cache_data[get_cache_addr(2'd0, write_rel_addr[8:0])] <= pd_in;
-                        end else if (write_rel_addr < 11'd1024) begin
-                            cache_data[get_cache_addr(2'd1, write_rel_addr[8:0])] <= pd_in;
-                        end else begin
-                            cache_data[get_cache_addr(2'd2, write_rel_addr[8:0])] <= pd_in;
-                        end
+                        // The received byte is written to the cache by the
+                        // dedicated single-write-port block (pf_wr_en); here we
+                        // only advance the byte index.
                         data_idx <= data_idx + 1'b1;
                     end
                 end
@@ -641,4 +671,21 @@ module profile (
             cmd_in_rst  <= cmd_in_rst + 4'd1;
         end
     end
+endmodule
+
+// Simple 1-write / 1-async-read LUT-RAM. The canonical pattern below maps to
+// Cyclone V MLAB (distributed LUT-RAM), which — unlike M10K block RAM — supports
+// an asynchronous (combinational) read, as the ProFile data path needs. Used for
+// the ProFile sector cache so it costs a handful of ALMs instead of ~16K FFs.
+module lutram_1w1r #(parameter AW = 10, parameter DW = 8) (
+    input               clk,
+    input               we,
+    input  [AW-1:0]     waddr,
+    input  [DW-1:0]     wdata,
+    input  [AW-1:0]     raddr,
+    output [DW-1:0]     rdata
+);
+    (* ramstyle = "MLAB, no_rw_check" *) reg [DW-1:0] mem [2**AW];
+    always @(posedge clk) if (we) mem[waddr] <= wdata;
+    assign rdata = mem[raddr]; // asynchronous read
 endmodule
