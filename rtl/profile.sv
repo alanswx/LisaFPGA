@@ -187,7 +187,10 @@ module profile (
                 ST_IDLE: begin
                     _BSY <= 1'b1;
                     pd_oe <= 1'b0;
-                    if (cmd_falling) begin
+                    // The Lisa can assert _CMD while _PRES is still low during
+                    // boot. A real ESProFile sees the line after reset releases;
+                    // do the same instead of requiring a new falling edge.
+                    if (cmd_falling || _CMD == 1'b0) begin
                         state <= ST_HANDSHAKE_0;
                     end
                 end
@@ -499,15 +502,18 @@ module profile (
     //  strb_edges  = _PSTRB falling edges (byte strobes)
     //  rd_acks     = completed SD reads (sd_ack while sd_rd)
     //  pres        = _PRES level (0 = Lisa holding ProFile in reset)
-    reg [4:0] max_state = 0;
-    reg [7:0] cmd_edges = 0, strb_edges = 0, rd_acks = 0;
+    reg [4:0] max_state /*verilator public_flat_rd*/ = 0;
+    reg [7:0] cmd_edges /*verilator public_flat_rd*/ = 0;
+    reg [7:0] strb_edges /*verilator public_flat_rd*/ = 0;
+    reg [7:0] rd_acks /*verilator public_flat_rd*/ = 0;
     reg cmd_d = 1, strb_d = 1, rd_ack_d = 0;
     // DEBUG: when a _CMD falling edge arrives while the FSM is held in reset
     // (the failing case: the Lisa commands us while (reset || _PRES==0) is true),
     // latch WHICH reset source was active so we know whether it's the core reset
     // or _PRES/_CRES holding us off. cmd_in_rst counts these missed commands.
-    reg rst_at_cmd = 0, pres_at_cmd = 1;
-    reg [3:0] cmd_in_rst = 0;
+    reg rst_at_cmd /*verilator public_flat_rd*/ = 0;
+    reg pres_at_cmd /*verilator public_flat_rd*/ = 1;
+    reg [3:0] cmd_in_rst /*verilator public_flat_rd*/ = 0;
     always_ff @(posedge clk) begin
         if (state > max_state) max_state <= state;
         cmd_d <= _CMD; strb_d <= _PSTRB; rd_ack_d <= (sd_rd & sd_ack);

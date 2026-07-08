@@ -1033,8 +1033,9 @@ module IO_board(
     // scan (the STARTUP-FROM menu blocked it) -> emulator never commanded. If
     // pen_fall_cnt > 0 but the emulator still sees no _CMD, the gating/wiring is
     // broken. cmdu_edge_cnt = raw VIA PB4(_CMD) toggles regardless of the gate.
-    logic [15:0] dbg_pen_fall_cnt = 0, dbg_cmdu_edge_cnt = 0;
-    logic [3:0]  dbg_cmd_while_en = 0; // _CMD_ungated falls while _ProFile_EN low
+    logic [15:0] dbg_pen_fall_cnt /*verilator public_flat_rd*/ = 0;
+    logic [15:0] dbg_cmdu_edge_cnt /*verilator public_flat_rd*/ = 0;
+    logic [3:0]  dbg_cmd_while_en /*verilator public_flat_rd*/ = 0; // _CMD_ungated falls while _ProFile_EN low
     logic dbg_pen_d = 1, dbg_cmdu_d = 1;
     always_ff @(posedge clk_sys) begin
         dbg_pen_d  <= _ProFile_EN;
@@ -1258,14 +1259,28 @@ module IO_board(
     end
 
     `ifdef SIMULATION
-    logic [1:0] sim_cop_byte_idx = 2'd0;
+    logic [5:0] sim_cop_byte_idx /*verilator public_flat_rd*/ = 6'd0;
+    logic [1:0] sim_cop_seq_kind = 2'd0; // 1=keyboard reset, 2=ROM COP command 0x02, 3=injected key
+    logic [7:0] sim_cop_key_inject /*verilator public_flat_rw*/ = 8'h00;
     logic sim_cop_power_seen = 1'b0;
     logic sim_cop_started = 1'b0;
     logic sim_cop_ack_prev = 1'b1;
+    logic sim_cop_kbd_reset_active = 1'b0;
+    logic sim_cop_send_pending = 1'b0;
+    logic sim_cop_cmd_active = 1'b0;
+    logic sim_cop_cmd_pending = 1'b0;
+    logic sim_cop_response_armed = 1'b0;
+    logic [7:0] sim_cop_l_out_prev = 8'h80;
+    logic sim_cop_ora_read_toggle = 1'b0;
+    logic [19:0] sim_cop_gap_cnt = 20'd0;
+    logic [11:0] sim_cop_hold_cnt = 12'd0;
     logic [11:0] sim_cop_power_cnt = 12'd0;
 
     always_ff @(posedge clk_sys) begin
         if (copck2x_en) begin
+            logic kbd_reset_asserted;
+            kbd_reset_asserted = (KBD_via_DDRB[0] && !_KBD_reset_VIA);
+
             if (!_PWRSW_COP) begin
                 sim_cop_power_seen <= 1'b1;
                 if (sim_cop_power_cnt != 12'hfff) sim_cop_power_cnt <= sim_cop_power_cnt + 1'b1;
@@ -1277,19 +1292,107 @@ module IO_board(
                 _READY_COP <= 1'b0;
                 KBD_mouse_mux_sel <= 2'b00;
                 KBD_reset_COP <= 1'b1;
-                DATA_QUEUED_COP <= 1'b1;
+                DATA_QUEUED_COP <= 1'b0;
                 L_COP_in <= 8'h80;
-                sim_cop_byte_idx <= 2'd0;
+                sim_cop_byte_idx <= 6'd0;
+                sim_cop_seq_kind <= 2'd0;
+                sim_cop_gap_cnt <= 20'd0;
+                sim_cop_hold_cnt <= 12'd0;
+                sim_cop_kbd_reset_active <= 1'b0;
+                sim_cop_send_pending <= 1'b0;
+                sim_cop_cmd_active <= 1'b0;
+                sim_cop_cmd_pending <= 1'b0;
+                sim_cop_response_armed <= 1'b0;
+                sim_cop_l_out_prev <= L_COP_out_int;
+                sim_cop_ack_prev <= sim_cop_ora_read_toggle;
             end else if (sim_cop_started) begin
-                _READY_COP <= 1'b0;
                 KBD_reset_COP <= 1'b1;
-                if (DATA_QUEUED_COP && READ_ACK_COP_sync != sim_cop_ack_prev) begin
-                    if (sim_cop_byte_idx == 2'd0) begin
-                        L_COP_in <= 8'hbf;
-                        sim_cop_byte_idx <= 2'd1;
-                    end else begin
-                        DATA_QUEUED_COP <= 1'b0;
+
+                if (L_COP_out_int != sim_cop_l_out_prev) begin
+                    if (L_COP_out_int == 8'h02) begin
+                        sim_cop_cmd_pending <= 1'b1;
                     end
+                    sim_cop_l_out_prev <= L_COP_out_int;
+                end
+
+                if (KBD_via_DDRA == 8'hff && !sim_cop_cmd_active) begin
+                    sim_cop_cmd_active <= 1'b1;
+                    _READY_COP <= 1'b1;
+                    if ((sim_cop_cmd_pending || sim_cop_byte_idx >= 3'd2) &&
+                        sim_cop_seq_kind == 2'd0 && !DATA_QUEUED_COP && sim_cop_gap_cnt == 20'd0) begin
+                        sim_cop_seq_kind <= 2'd2;
+                        sim_cop_byte_idx <= 6'd0;
+                        sim_cop_send_pending <= 1'b0;
+                        sim_cop_response_armed <= 1'b1;
+                        sim_cop_cmd_pending <= 1'b0;
+                    end
+                end else if (KBD_via_DDRA == 8'hff) begin
+                    _READY_COP <= 1'b1;
+                end else if (KBD_via_DDRA != 8'hff) begin
+                    if (sim_cop_response_armed) begin
+                        sim_cop_response_armed <= 1'b0;
+                        sim_cop_send_pending <= 1'b1;
+                        sim_cop_gap_cnt <= 20'd64;
+                    end
+                    sim_cop_cmd_active <= 1'b0;
+                    _READY_COP <= 1'b0;
+                end
+
+                if (kbd_reset_asserted) begin
+                    sim_cop_kbd_reset_active <= 1'b1;
+                end else if (sim_cop_kbd_reset_active) begin
+                    sim_cop_kbd_reset_active <= 1'b0;
+                    sim_cop_byte_idx <= 6'd0;
+                    sim_cop_seq_kind <= 2'd1;
+                    sim_cop_send_pending <= 1'b1;
+                    sim_cop_gap_cnt <= 20'd625000;
+                    DATA_QUEUED_COP <= 1'b0;
+                    sim_cop_hold_cnt <= 12'd0;
+                end else if (sim_cop_key_inject != 8'h00 && sim_cop_seq_kind == 2'd0 &&
+                             !DATA_QUEUED_COP && sim_cop_gap_cnt == 20'd0 &&
+                             !sim_cop_send_pending && !sim_cop_response_armed) begin
+                    L_COP_in <= sim_cop_key_inject;
+                    DATA_QUEUED_COP <= 1'b1;
+                    sim_cop_seq_kind <= 2'd3;
+                    sim_cop_byte_idx <= 6'd0;
+                    sim_cop_hold_cnt <= 12'd0;
+                    sim_cop_ack_prev <= sim_cop_ora_read_toggle;
+                    sim_cop_key_inject <= 8'h00;
+                end else if (sim_cop_gap_cnt != 20'd0) begin
+                    DATA_QUEUED_COP <= 1'b0;
+                    sim_cop_gap_cnt <= sim_cop_gap_cnt - 1'b1;
+                    sim_cop_hold_cnt <= 12'd0;
+                    if (sim_cop_gap_cnt == 20'd1 && sim_cop_send_pending) begin
+                        if (sim_cop_seq_kind == 2'd2 && (sim_cop_byte_idx[2:0] == 3'd0)) begin
+                            L_COP_in <= 8'h80;
+                        end else if (sim_cop_seq_kind == 2'd2 && (sim_cop_byte_idx[2:0] == 3'd1)) begin
+                            L_COP_in <= 8'he0;
+                        end else if (sim_cop_byte_idx == 6'd0) begin
+                            L_COP_in <= 8'h80;
+                        end else if (sim_cop_seq_kind == 2'd1 && sim_cop_byte_idx == 6'd1) begin
+                            L_COP_in <= 8'hbf;
+                        end else begin
+                            L_COP_in <= 8'h00;
+                        end
+                        DATA_QUEUED_COP <= 1'b1;
+                        sim_cop_send_pending <= 1'b0;
+                        sim_cop_ack_prev <= sim_cop_ora_read_toggle;
+                    end
+                end else if (DATA_QUEUED_COP && sim_cop_ora_read_toggle != sim_cop_ack_prev) begin
+                    DATA_QUEUED_COP <= 1'b0;
+                    sim_cop_byte_idx <= sim_cop_byte_idx + 1'b1;
+                    sim_cop_hold_cnt <= 12'd0;
+                    if ((sim_cop_seq_kind == 2'd1 && sim_cop_byte_idx == 6'd0) ||
+                        (sim_cop_seq_kind == 2'd2 && sim_cop_byte_idx < 6'd63)) begin
+                        sim_cop_send_pending <= 1'b1;
+                        sim_cop_gap_cnt <= 20'd64;
+                    end else begin
+                        sim_cop_seq_kind <= 2'd0;
+                    end
+                end else if (DATA_QUEUED_COP && sim_cop_hold_cnt == 12'hfff) begin
+                    sim_cop_hold_cnt <= 12'hfff;
+                end else if (DATA_QUEUED_COP && sim_cop_hold_cnt != 12'hfff) begin
+                    sim_cop_hold_cnt <= sim_cop_hold_cnt + 1'b1;
                 end
             end else begin
                 ON <= 1'b0;
@@ -1298,9 +1401,20 @@ module IO_board(
                 KBD_reset_COP <= 1'b1;
                 DATA_QUEUED_COP <= 1'b0;
                 L_COP_in <= 8'h80;
+                sim_cop_gap_cnt <= 20'd0;
+                sim_cop_hold_cnt <= 12'd0;
+                sim_cop_kbd_reset_active <= 1'b0;
+                sim_cop_send_pending <= 1'b0;
+                sim_cop_seq_kind <= 2'd0;
+                sim_cop_cmd_active <= 1'b0;
+                sim_cop_cmd_pending <= 1'b0;
+                sim_cop_response_armed <= 1'b0;
+                sim_cop_l_out_prev <= L_COP_out_int;
             end
 
-            sim_cop_ack_prev <= READ_ACK_COP_sync;
+            if (!(sim_cop_started && (sim_cop_gap_cnt != 20'd0 || DATA_QUEUED_COP))) begin
+                sim_cop_ack_prev <= sim_cop_ora_read_toggle;
+            end
             _NMI_COP <= 1'b1;
         end
     end
@@ -1358,6 +1472,13 @@ module IO_board(
     logic [7:0] dbg_pp_io_nz = 0;
     logic [3:0] dbg_kv_last_addr = 0;
     logic       dbg_vma_d = 1, dbg_cskv_d = 1, dbg_kv_sel_d = 0;
+    logic [7:0] dbg_kv_read_data /*verilator public_flat_rd*/ = 0;
+    logic [7:0] dbg_kv_read_ora /*verilator public_flat_rd*/ = 0;
+    logic [7:0] dbg_kv_read_ifr /*verilator public_flat_rd*/ = 0;
+    logic [3:0] dbg_kv_read_addr /*verilator public_flat_rd*/ = 0;
+    logic [7:0] dbg_kv_read_count /*verilator public_flat_rd*/ = 0;
+    logic       dbg_kv_read_so /*verilator public_flat_rd*/ = 0;
+    logic       dbg_kv_read_ack /*verilator public_flat_rd*/ = 0;
     always_ff @(posedge clk_sys) begin
         if (dotck_en) begin
             dbg_vma_d  <= _VMA;
@@ -1375,6 +1496,20 @@ module IO_board(
                 end
             end
             if (dbg_kv_sel_d && !CS_KBD_VIA && READ) dbg_kv_last_rd <= D_out_KBD_VIA; // capture at access end
+            if (CS_KBD_VIA && READ && E_neg_phase) begin
+                dbg_kv_read_count <= dbg_kv_read_count + 1'b1;
+                dbg_kv_read_addr <= A[4:1];
+                dbg_kv_read_data <= D_out_KBD_VIA;
+                dbg_kv_read_ora <= (L_COP_out_int & KBD_via_DDRA) | (L_COP_in & ~KBD_via_DDRA);
+                dbg_kv_read_ifr <= {KBIR, kbd_via.irq_flags};
+                dbg_kv_read_so <= DATA_QUEUED_COP_sync;
+                dbg_kv_read_ack <= READ_ACK_COP;
+            end
+            `ifdef SIMULATION
+            if (CS_KBD_VIA && READ && E_neg_phase && A[4:1] == 4'h1) begin
+                sim_cop_ora_read_toggle <= ~sim_cop_ora_read_toggle;
+            end
+            `endif
             // Capture the data path at the exact moment the via6522 model latches
             // a write (wen & E-falling strobe): IO_D is what the VIA sees,
             // BD_in[7:0] is what the CPU/top mux delivered. Nonzero BD with zero
@@ -1415,8 +1550,8 @@ module IO_board(
 
     logic READ_ACK_COP_ungated;
     logic ca2_oe;
-    logic [7:0] L_COP_out_int;
-    logic [7:0] KBD_via_DDRA;
+    logic [7:0] L_COP_out_int /*verilator public_flat_rd*/;
+    logic [7:0] KBD_via_DDRA /*verilator public_flat_rd*/;
 
     // And now we instantiate the chip
     via6522 kbd_via(
@@ -1450,12 +1585,19 @@ module IO_board(
     // byte; this shows whether the COP raises SO (data queued), what byte it
     // puts on the L bus, whether the 68k's read-acks reach it, and whether the
     // COP is busy talking to the keyboard line instead.
-    logic [7:0] dbg_so_cnt = 0, dbg_ack_cnt = 0, dbg_kbdout_cnt = 0, dbg_kbdin_cnt = 0;
-    logic [7:0] dbg_l_in_last = 0, dbg_l_out_last = 0;
+    logic [7:0] dbg_so_cnt /*verilator public_flat_rd*/ = 0;
+    logic [7:0] dbg_ack_cnt /*verilator public_flat_rd*/ = 0;
+    logic [7:0] dbg_kbdout_cnt /*verilator public_flat_rd*/ = 0;
+    logic [7:0] dbg_kbdin_cnt /*verilator public_flat_rd*/ = 0;
+    logic [7:0] dbg_l_in_last /*verilator public_flat_rd*/ = 0;
+    logic [7:0] dbg_l_out_last /*verilator public_flat_rd*/ = 0;
     logic       dbg_so_d = 0, dbg_ack_d = 0, dbg_kbdo_d = 1, dbg_kbdi_d = 1;
     // DEBUG: capture the FIRST 4 keycodes the COP sends the CPU at boot (frozen
     // after 4) so we can see the exact reset/keypress sequence that sets BTMENU.
-    logic [7:0] kc0 = 0, kc1 = 0, kc2 = 0, kc3 = 0;
+    logic [7:0] kc0 /*verilator public_flat_rd*/ = 0;
+    logic [7:0] kc1 /*verilator public_flat_rd*/ = 0;
+    logic [7:0] kc2 /*verilator public_flat_rd*/ = 0;
+    logic [7:0] kc3 /*verilator public_flat_rd*/ = 0;
     logic [2:0] kc_idx = 0;
     always_ff @(posedge clk_sys) begin
         if (dotck_en) begin

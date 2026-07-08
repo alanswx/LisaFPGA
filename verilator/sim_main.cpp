@@ -59,17 +59,19 @@ struct SimOptions {
 	uint64_t cycles = 0;
 	uint64_t status_interval = 5000000;
 	bool trace = false;
+	bool boot_profile = false;
 	std::string profile_image = "profile.image";
 };
 
 static void PrintUsage(const char* argv0) {
 	fprintf(stderr,
-		"Usage: %s [--profile <image>] [--headless] [--cycles <count>] [--trace] [--help]\n"
+		"Usage: %s [--profile <image>] [--headless] [--cycles <count>] [--boot-profile] [--trace] [--help]\n"
 		"\n"
 		"  --profile <image>  ProFile disk image to mount (default: profile.image)\n"
 		"                     Aliases: --profile-image, --proimage\n"
 		"  --headless         Run without SDL/ImGui windows\n"
 		"  --cycles <count>   Headless cycles to run; 0 runs until interrupted (default: 0)\n"
+		"  --boot-profile     Headless: select ProFile at the Lisa STARTUP FROM menu\n"
 		"  --trace            Enable 68k instruction trace output\n"
 		"  --status-interval <count>\n"
 		"                     Headless status interval in cycles; 0 disables (default: 5000000)\n",
@@ -84,6 +86,8 @@ static bool ParseOptions(int argc, char** argv, SimOptions* options) {
 			exit(0);
 		} else if (arg == "--headless") {
 			options->headless = true;
+		} else if (arg == "--boot-profile") {
+			options->boot_profile = true;
 		} else if (arg == "--trace") {
 			options->trace = true;
 		} else if (arg == "--profile" || arg == "--profile-image" || arg == "--proimage") {
@@ -148,6 +152,10 @@ bool break_pending = false;
 bool old_vpb = false;
 bool headless_mode = false;
 uint64_t headless_status_interval = 5000000;
+bool headless_boot_profile = false;
+bool headless_boot_profile_started = false;
+uint64_t headless_boot_profile_ready_time = 0;
+size_t headless_boot_profile_step = 0;
 
 // HPS emulator
 // ------------
@@ -867,13 +875,71 @@ static uint32_t GetCpuPc()
 	       VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__PcL;
 }
 
+static uint32_t GetCpuD7()
+{
+	return ((uint32_t)VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__regs68H[7] << 16) |
+	       VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__regs68L[7];
+}
+
+static bool CpuAtStartupFromMenu()
+{
+	uint32_t pc = GetCpuPc();
+	return pc >= 0xFE2DC0 && pc <= 0xFE2DDF;
+}
+
+static void DriveHeadlessProfileBoot()
+{
+	static const uint8_t boot_keys[] = {
+		0xFF, // Apple down
+		0xF2, // main-row 3 down
+		0x72, // main-row 3 up
+		0x7F, // Apple up
+	};
+
+	if (!headless_boot_profile_started) {
+		if (main_time <= 100000000) {
+			return;
+		}
+		if (headless_boot_profile_ready_time == 0) {
+			if (!CpuAtStartupFromMenu()) {
+				return;
+			}
+			headless_boot_profile_ready_time = main_time + 50000000;
+			fprintf(stderr, "headless: saw STARTUP FROM menu at main_time=%llu pc=%06X; waiting to inject\n",
+				(unsigned long long)main_time, GetCpuPc());
+			return;
+		}
+		if (main_time < headless_boot_profile_ready_time || !CpuAtStartupFromMenu()) {
+			return;
+		}
+		headless_boot_profile_started = true;
+		fprintf(stderr, "headless: starting ProFile boot key sequence at main_time=%llu pc=%06X\n",
+			(unsigned long long)main_time, GetCpuPc());
+	}
+
+	if (headless_boot_profile_step >= sizeof(boot_keys)) {
+		return;
+	}
+
+	if (VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__sim_cop_key_inject == 0) {
+		uint8_t key = boot_keys[headless_boot_profile_step++];
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__sim_cop_key_inject = key;
+		fprintf(stderr, "headless: queued COP key 0x%02X at main_time=%llu pc=%06X\n",
+			key, (unsigned long long)main_time, GetCpuPc());
+	}
+}
+
 static void PrintHeadlessStatus()
 {
 	fprintf(stderr,
 		"main_time=%llu pc=%06X ON=%d reset=%d pwrsw_n=%d "
 		"RESETn=%d BERRn=%d BUSTn=%d HDERn=%d SFERn=%d CDACKn=%d "
 		"RSTSWint=%d ONprev=%d "
-		"SPIO=%d IOCY=%d MMUIO=%d CPUC1=%d MCY=%d UA=%06X "
+		"SPIO=%d IOCY=%d MMUIO=%d CPUC1=%d MCY=%d UA=%06X D7=%08x "
+		"COP{so=%02x ack=%02x kbdin=%02x in=%02x out=%02x kc=%02x,%02x,%02x,%02x dq=%d ra=%d idx=%d} "
+		"KBD{prb=%02x ddrb=%02x pcr=%02x acr=%02x ifr=%02x ier=%02x irq=%d pres=%d} "
+		"PP{prb=%02x ddrb=%02x penfall=%04x cmduedge=%04x cmdinen=%x} "
+		"PRO{state=%02x max=%02x cmd=%02x strb=%02x rdack=%02x cinrst=%x rst=%d pres=%d blk=%06x c0=%02x} "
 		"sd_rd=%03x sd_wr=%03x lba0=%u mounted=%03x\n",
 		(unsigned long long)main_time,
 		GetCpuPc(),
@@ -894,6 +960,42 @@ static void PrintHeadlessStatus()
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__CPUC1,
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__MCY,
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__UA,
+		GetCpuD7(),
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_so_cnt,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_ack_cnt,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_kbdin_cnt,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_l_in_last,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_l_out_last,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kc0,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kc1,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kc2,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kc3,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__DATA_QUEUED_COP,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__READ_ACK_COP,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__sim_cop_byte_idx,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__prb,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__ddrb,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__pcr,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__acr,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__irq_flags,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__irq_mask,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__KBIR,
+		VERTOPINTERN->emu__DOT___PRES_esprofile,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__pp_via__DOT__prb,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__pp_via__DOT__ddrb,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_pen_fall_cnt,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_cmdu_edge_cnt,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_cmd_while_en,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__state,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__max_state,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__cmd_edges,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__strb_edges,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__rd_acks,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__cmd_in_rst,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__rst_at_cmd,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__pres_at_cmd,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__block_num,
+		VERTOPINTERN->emu__DOT__profile_i__DOT__commandBuffer[0],
 		top->sd_rd,
 		top->sd_wr,
 		top->sd_lba[0],
@@ -901,7 +1003,6 @@ static void PrintHeadlessStatus()
 }
 
 int verilate() {
-
 	if (!Verilated::gotFinish()) {
 		if (soft_reset) {
 			fprintf(stderr, "soft_reset.. in gotFinish\n");
@@ -978,8 +1079,9 @@ int verilate() {
 		}
 
 		if (clk_sys.IsRising()) {
-
-
+			if (headless_mode && headless_boot_profile) {
+				DriveHeadlessProfileBoot();
+			}
 
 			// IWM EMULATION HERE
 			//         CData/*7:0*/ emu__DOT__top__DOT__core__DOT__iwm__DOT__addr;
@@ -1000,7 +1102,6 @@ int verilate() {
 					(long long)main_time, top->ON, top->reset, video.count_frame, top->pwrsw_n_out);
 				fflush(stderr);
 			}
-
 
 			main_time++;
 		}
@@ -1063,6 +1164,7 @@ int main(int argc, char** argv, char** env) {
 	}
 	headless_mode = options.headless;
 	headless_status_interval = options.status_interval;
+	headless_boot_profile = options.boot_profile;
 	cpu_trace_enable = options.trace;
 
 	// Create core and initialise

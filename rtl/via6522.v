@@ -65,8 +65,8 @@ wire [7:0]  last_data = 8'h55;
 reg [7:0] port_a_c = 8'h00;
 reg [7:0] port_b_c = 8'h00;
 
-reg [6:0] irq_mask = 8'h00;
-reg [6:0] irq_flags = 8'h00;
+reg [6:0] irq_mask /*verilator public_flat_rd*/ = 8'h00;
+reg [6:0] irq_flags /*verilator public_flat_rd*/ = 8'h00;
 wire [6:0] irq_events;   
 wire irq_out;
 
@@ -77,8 +77,8 @@ reg [15:0] timer_b_count = latch_reset_pattern;
 wire	   timer_a_out;
 reg	   timer_b_tick;
 
-reg [7:0] acr = 8'h00;   
-reg [7:0] pcr = 8'h00;
+reg [7:0] acr /*verilator public_flat_rd*/ = 8'h00;
+reg [7:0] pcr /*verilator public_flat_rd*/ = 8'h00;
 reg [7:0] shift_reg = 8'h00;
 wire   serport_en; // Alex - Changed from reg to wire
 wire   ser_cb2_o; // Alex - Changed from reg to wire
