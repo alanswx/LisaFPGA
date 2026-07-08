@@ -1501,7 +1501,15 @@ module IO_board(
                 dbg_kv_read_addr <= A[4:1];
                 dbg_kv_read_data <= D_out_KBD_VIA;
                 dbg_kv_read_ora <= (L_COP_out_int & KBD_via_DDRA) | (L_COP_in & ~KBD_via_DDRA);
+                // kbd_via.irq_flags is a hierarchical reference into the VIA
+                // instance: Verilator supports it (marked public_flat_rd) but
+                // Quartus synthesis cannot resolve it. dbg_kv_read_ifr is a
+                // sim-only debug signal, so drive the VIA's flags only in sim.
+`ifdef SIMULATION
                 dbg_kv_read_ifr <= {KBIR, kbd_via.irq_flags};
+`else
+                dbg_kv_read_ifr <= {KBIR, 7'b0};
+`endif
                 dbg_kv_read_so <= DATA_QUEUED_COP_sync;
                 dbg_kv_read_ack <= READ_ACK_COP;
             end
