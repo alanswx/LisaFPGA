@@ -106,11 +106,21 @@ void SimBlockDevice::BeforeEval(uint64_t cycles)
 
     if (current_disk < 0) return;
 
-    if (ack_delay > 1) {
+    // Latency phase: sd_ack LOW while the "HPS" fetches the sector. This mimics
+    // the real MiSTer round-trip to the ARM before any data is available.
+    if (ack_delay > 0) {
         bitclear(*this->sd_ack, current_disk);
         ack_delay--;
         return;
     }
+
+    // Transfer phase: the REAL MiSTer HPS holds sd_ack HIGH for the ENTIRE
+    // sd_buff_wr stream and drops it only when the sector is done. The core
+    // captures data while sd_ack==1 and treats the FALLING edge as "complete".
+    // (The old model kept sd_ack LOW during the stream and pulsed it HIGH only
+    // afterward, which let rising-edge-completion cores pass in sim but fail on
+    // hardware — see references/MiSTer_HPS_SD_Protocol_Findings.md.)
+    bitset(*this->sd_ack, current_disk);
 
     if (reading) {
         if (bytecnt < 256) {
@@ -119,11 +129,12 @@ void SimBlockDevice::BeforeEval(uint64_t cycles)
             *this->sd_buff_dout = (high << 8) | low;
             *this->sd_buff_addr = bytecnt++;
             *this->sd_buff_wr = 1;
-            bitclear(*this->sd_ack, current_disk);
-            return;
+            return;                    // sd_ack stays HIGH while streaming
         }
         reading = false;
     } else if (writing) {
+        // sd_buff_din carries the core's data for the address we drove on the
+        // previous eval (1-cycle read latency on the core's buffer).
         if (*this->sd_buff_addr != bytecnt && *this->sd_buff_addr < 256) {
             uint16_t val = *(this->sd_buff_din[current_disk]);
             disk[current_disk].put(val & 0xFF);
@@ -132,21 +143,16 @@ void SimBlockDevice::BeforeEval(uint64_t cycles)
         }
         if (bytecnt < 256) {
             bytecnt++;
-            bitclear(*this->sd_ack, current_disk);
-            return;
+            return;                    // sd_ack stays HIGH while streaming
         }
         writing = false;
     }
 
-    bitset(*this->sd_ack, current_disk);
-
-    bool request_active =
-        bitcheck(*this->sd_rd, current_disk) || bitcheck(*this->sd_wr, current_disk);
-    if (!request_active) {
-        bitclear(*this->sd_ack, current_disk);
-        ack_delay = 0;
-        current_disk = -1;
-    }
+    // Whole sector transferred: drop sd_ack (its FALLING edge is "done") and go
+    // idle so the next sd_rd/sd_wr can start a fresh transfer.
+    bitclear(*this->sd_ack, current_disk);
+    ack_delay = 0;
+    current_disk = -1;
 }
 
 void SimBlockDevice::AfterEval()

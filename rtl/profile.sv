@@ -224,8 +224,18 @@ module profile (
 
     assign sd_buff_din = {odd_q, even_q};
 
+    // HPS transfer handshake tracking. Real MiSTer streams sd_buff_wr while
+    // sd_ack is HIGH and drops sd_ack when the transfer is done, so a transfer
+    // COMPLETES on the FALLING edge of sd_ack (not the rising edge — on hardware
+    // that fires at the START of the stream, before any data has landed).
+    // hps_req guards against a stale/early ack: we only complete a transfer we
+    // actually requested and saw acked.
+    reg hps_ack_d = 1'b0;
+    reg hps_req   = 1'b0;
+
     // Emulator FSM and Cache Logic
     always_ff @(posedge clk) begin
+        hps_ack_d <= sd_ack;
         if (reset || _PRES == 0) begin
             state <= ST_RESET;
             _BSY <= 1'b1;
@@ -239,6 +249,7 @@ module profile (
             cache_sec1_dirty <= 0;
             cache_sec2_dirty <= 0;
             host_ack_seen <= 1'b0;
+            hps_req <= 1'b0;
         end else begin
             case (state)
                 ST_RESET: begin
@@ -614,9 +625,19 @@ module profile (
 
                 // HPS SD Card Interface Handshaking states
                 ST_HPS_READ: begin
-                    sd_rd <= 1'b1;
-                    if (sd_ack) begin
-                        sd_rd <= 1'b0;
+                    // Request only when the bus is idle (no stale/pending ack).
+                    if (~sd_ack && ~sd_rd && ~hps_req) sd_rd <= 1'b1;
+                    // Our request was acked: drop sd_rd, mark the transfer in
+                    // progress. The sector words stream into the cache via the
+                    // sd_buff_wr write port while sd_ack stays high.
+                    if (sd_rd && sd_ack) begin
+                        sd_rd  <= 1'b0;
+                        hps_req <= 1'b1;
+                    end
+                    // sd_ack fell => the whole sector has streamed. Only now mark
+                    // the cache line valid and advance.
+                    if (hps_req && hps_ack_d && ~sd_ack) begin
+                        hps_req <= 1'b0;
                         if (active_slot == 2'd0) begin
                             cache_sec0_tag <= sd_lba;
                             cache_sec0_valid <= 1'b1;
@@ -635,16 +656,20 @@ module profile (
                 end
 
                 ST_HPS_WRITE: begin
-                    sd_wr <= 1'b1;
-                    if (sd_ack) begin
-                        sd_wr <= 1'b0;
+                    if (~sd_ack && ~sd_wr && ~hps_req) sd_wr <= 1'b1;
+                    if (sd_wr && sd_ack) begin
+                        sd_wr  <= 1'b0;
+                        hps_req <= 1'b1;
+                    end
+                    if (hps_req && hps_ack_d && ~sd_ack) begin
+                        hps_req <= 1'b0;
                         if (active_slot == 2'd0) begin
                             cache_sec0_dirty <= 1'b0;
                         end else if (active_slot == 2'd1) begin
                             cache_sec1_dirty <= 1'b0;
                         end else begin
-	                            cache_sec2_dirty <= 1'b0;
-	                        end
+                            cache_sec2_dirty <= 1'b0;
+                        end
                         state <= return_state;
                     end
                 end
