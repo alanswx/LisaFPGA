@@ -1,90 +1,90 @@
-# TODO — clocking refactor follow-ups (verify/fix after it runs on the FPGA)
+# TODO
 
-> **Hardware bring-up status (2026-07-07):** the core boots on the DE10-Nano at
-> 60 fps with clean, stable 720×364 video; keyboard + mouse work; SDRAM, error-50,
-> and the Vivado→Quartus tri-state bugs are fixed. The video-content bug (black
-> with a white vertical line) is **solved**.
->
-> **Top open item — ProFile won't boot:** root-caused to the COP mis-decoding the
-> keyboard power-up sequence (delivers `0x85,0x87` instead of `0x80`(RSTCODE)+
-> `0xBF`(ID)), which pops the STARTUP-FROM menu before the ROM reaches the ProFile
-> boot code. It's a keyboard↔COP serial bit-timing mis-decode; fix by tuning that
-> timing, verify via LCOP `kc0 → 0x80`. Also open: final video centering, strip
-> debug probes for release, close timing, SCC/FPU enable conversion.
->
-> Full bring-up details, every root cause, debug tooling (incl. mrext keyboard
-> injection), and next steps are in
-> **[progress_quartus_handover.md](progress_quartus_handover.md)**.
+## Current Status
 
+The MiSTer port builds and the Verilator simulator runs headless. The active
+debug target is ProFile boot from a mounted image.
 
-## What was done
-The Lisa core was converted from many derived/gated/muxed clocks (which overflowed
-the Cyclone V PLLs and could not route) to a **single clock + clock-enable**
-architecture:
+The original Xilinx LisaFPGA board supported two hard-disk paths by routing the
+Lisa parallel-port signals to either an external real ProFile connector or the
+onboard ESP32-based ESProFile emulator. The ProFile emulator was ESP32 firmware,
+not FPGA Verilog.
 
-- **One PLL** (`rtl/pll.sv`) produces only `clk_sys` (81.50016 MHz master) and its
-  phase-shifted SDRAM twin `clk_mem`. Both `dotck_mmcm` and `clock_divider`'s old
-  PLLs are gone.
-- `rtl/clock_divider.v` is now a pure **enable-strobe generator** in the clk_sys
-  domain: `dotck_en` (speed-selectable), `c16m_en` (÷5), `c5m_en` (÷16), and
-  `copck2x_en` / `sccck2x_en` / `usbclk_en` (phase-accumulator carry strobes).
-- Every module now runs on `clk_sys` and gates its registers with the matching
-  enable (`@(posedge clk_sys) if (x_en)`), instead of a dedicated clock. Converted:
-  top.sv, CPU_board, IO_board, mem_board_2mb/512k, usb_keyboard_interface,
-  usb_mouse_interface, Lite_Adapter. Enable-ready leaf models (fx68k `enPhi1/2`,
-  6502 `.phi`, via6522 `.rising/.falling`, COP `.ck_en_i`, LS259 `_G`,
-  LS323 `.clk_en`) were fed `clk_sys` with their enable gated by the rate strobe.
-- ON-gating and the DOTCK speed mux collapsed into enable masking (single domain,
-  no more per-domain clock synchronizers / behavioral clock muxes).
+The MiSTer port now uses an internal SystemVerilog ProFile emulator
+(`rtl/profile.sv`) backed by MiSTer/HPS block-device signals. Verilator uses
+`verilator/sim/sim_blkdevice.cpp` as the host-side block-device service.
 
-## MUST verify (functional — could not be checked here)
-This was validated structurally (it must build + place + **route** now), but NOT
-functionally. Verify in simulation and/or on hardware:
-1. **Boot + video**: ROM boots, DOTCK-domain video timing correct at 20 MHz.
-2. **Keyboard/mouse via the COP** (6504/COP421 path in IO_board).
-3. **68000 timing**: fx68k is fed `clk_sys` with `enPhi1/enPhi2` gated by `dotck_en`
-   (CPU_board). Confirm bus timing / E-clock phases still line up.
-4. **Memory**: MMU_RAM_2148, RAM_matrix and the SDRAM controllers inside the
-   mem_boards were left running on raw `clk_sys` (full speed) rather than a
-   dotck_en enable. Writes are idempotent across the fast cycles, but confirm no
-   double-action side effects.
+## Done Recently
 
-## Timing closure (in progress)
-- The design now **fits, routes, and builds** to `output_files/Lisa.sof` + `Lisa.rbf`.
-- Fixed `sys/sys_top.sdc` line 14: the core-PLL clock-group filter was
-  `*|pll|pll_inst|...` which did NOT match our PLL (`emu|main_pll|...`), so paths
-  between clk_sys and the framework audio/HDMI/HPS clocks were analyzed as
-  synchronous → huge FALSE violations. Changed it to `*|main_pll|...`. That took
-  worst-case setup slack from −39.7 ns to −4.7 ns.
-- After rebuilding with the corrected SDC (fitter no longer chasing false paths),
-  timing is essentially closed: **worst setup −0.609 ns** (TNS −5.6 ns, a few
-  endpoints) and **worst hold −0.576 ns** (a single endpoint), both on the core
-  `clk_sys` domain. The HDMI/audio/HPS framework domains now PASS.
-- To reach full closure: the remaining sub-ns paths are almost certainly the SCC
-  (z8530) and AM9512 FPU running at full clk_sys, plus an async-latch path. Close
-  via (a) proper enable conversion of SCC/FPU, (b) `set_multicycle_path` on those
-  blocks, and/or (c) constraining the async TTL-latch nets (`_CAS`, `_MALE`,
-  `_AS`, `_MMUIO`, `_IOCY` — auto-detected as unconstrained clocks) with
-  `set_false_path` or restructuring. The single −0.576 ns HOLD path matters most
-  (hold can't be fixed by slowing the clock) — identify and fix it first.
+- Enabled 2MB RAM in the simulator so Lisa Office System can load past the
+  earlier loader memory-exhaustion failure (`10727`).
+- Fixed the Verilator block-device mount delay so `img_mounted` clears and later
+  ProFile sector requests are not blocked.
+- Reworked the Verilator block-device service to stream 256 16-bit words per
+  sector and hold `sd_ack` until `sd_rd`/`sd_wr` deasserts.
+- Fixed the block-device cycle counter width. ProFile boot begins after billions
+  of simulator cycles in the 2MB configuration, so an `int` cycle argument
+  overflowed and made the backend ignore late `sd_rd` requests.
+- Cloned ESProFile into `reference/ESProFile` for protocol comparison.
+- Matched ESProFile's 10MB spare-table identity fields for `10350592` byte
+  images by passing `img_size` into `profile.sv`.
+- Matched ESProFile read timing more closely by preloading the first status byte
+  before releasing `_BSY` for a ProFile read response.
+- Reviewed LisaEm's ProFile implementation. LisaEm normalizes ProFile media as
+  DC42 and applies `deinterleave5()` before reading that image; the local raw
+  `.image` files are already in physical ProFile order, so the RTL should not
+  apply that mapping to these files.
+- Identified Lisa ROM boot error `84` as `BADHDR`, then verified the current
+  ProFile path delivers block 0 correctly (`hdr0=00000022aaaa8200`).
+- Verified the LOS 3.0 image is already in physical ProFile interleave order:
+  `LDPROF`'s 9:1 software interleave maps the logical boot blocks to valid
+  checksummed physical blocks.
+- Verified clean simulator video through the ROM self-check window.
+- Added headless diagnostics: `--status-start`, `--stop-pc`, `--stop-start`, and
+  `--dump-rom-state`.
 
-## Known-deferred / intentionally approximate
-1. **SCC serial (z8530_scc) runs at clk_sys.** Its `clk`/`pclk`/`sclk` were all tied
-   to `clk_sys`, so Serial A/B **baud rates are wrong** (≈20× too fast) and the
-   internal clk↔sclk CDC is now same-clock. `sccck_en` is generated and routed to
-   IO_board but unused. To restore serial: add serial clock-enable ports to
-   z8530_scc, guard its ~22 `sclk_a`/`sclk_b` blocks with `sccck_en` (Serial B) and
-   a `c4m_en` (Serial A / pclk), and its bus blocks with `dotck_en`.
-2. **AM9512 FPU runs at clk_sys** instead of ~2 MHz C2M (no enable port). Faster
-   math; result is polled so likely fine, but confirm. Give it a `c2m_en` gate if
-   needed (it needs an added enable port).
-3. **C4M / C2M generation in IO_board is now dead** (their consumers moved to
-   clk_sys). Left in place; can be deleted.
-4. **DOTCK 60 MHz turbo** (`speed_sel==01`) is an irregular 3-of-4 enable pattern;
-   20/40/80 modes are exact. See `clock_divider.v`.
-5. **usbclk ~12 MHz** and **COPCK/SCCCK** rates come from phase accumulators
-   (average frequency correct to ppm). USB HID host is stubbed on MiSTer anyway.
-6. **SDRAM phase shift** is `9816 ps` (= −2454 ps), snapped to the PLL's legal
-   307 ps grid (intended −2500 ps; 46 ps off, negligible).
-7. `rtl/dotck_mmcm.v` is now an unused module (no longer instantiated). Can be
-   removed from `files.qip`.
+## Active ProFile Boot Work
+
+1. Run a long headless boot with:
+
+   ```sh
+   cd verilator
+   ./obj_dir/Vemu --headless --boot-profile \
+     --profile "Lisa Office System 3.0 and Workshop 3.0.image" \
+     --cycles 3800000000 \
+     --status-interval 500000000 \
+     --screenshot /tmp/lisa.ppm
+   ```
+
+2. Watch the ProFile status fields:
+
+   - `PRO{state=1b}` means `profile.sv` is in `ST_HPS_READ`.
+   - `sd_rd=001` with no `rdack` means the block-device backend or `sd_ack`
+     handoff is still suspect.
+   - advancing `rdack` means the sector read completed and the next issue is
+     likely ProFile protocol/status/data behavior.
+   - `stat0` and `hdr0` capture the first status bytes and first eight block-0
+     header bytes delivered by `profile.sv`; for the LOS 3.0 image, a correct
+     first header starts `00000022aaaa8200`.
+
+3. Current traces leave ROM block-0 validation, execute loaded ProFile boot code
+   around `0x207F34..0x207F38`, then return to ROM/monitor code. Use
+   `--stop-pc 0xFE0084 --stop-start 3300000000` to catch a loader `bootbomb`
+   jump into the ROM monitor before registers are clobbered.
+
+4. A fresh run is validating the ESProFile-style status-byte preload fix. If it
+   still returns to ROM/monitor code, the next suspect is later loaded-driver
+   ProFile status/handshake timing rather than block-0 data or spare-table
+   identity.
+
+## Hardware / Release Follow-Ups
+
+- Test the current ProFile changes on FPGA once the simulator reaches a useful
+  checkpoint or the user can try a build.
+- Strip or gate any remaining debug-only probes before a clean release build.
+- Close remaining timing warnings, especially SCC/FPU paths that still run from
+  raw `clk_sys`.
+- Restore SCC baud-rate correctness by adding proper clock enables to
+  `z8530_scc`.
+- Decide whether the ESProFile reference clone should stay untracked under
+  `reference/` or be documented as a local-only reference checkout.

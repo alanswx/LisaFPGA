@@ -327,6 +327,13 @@ Most people (even those who are fabricating their own boards) won't need to do t
 
 Keep in mind that this is NOT the code that runs on ESProFile and ESFloppy. The source code for the two emulators can be found in their own respective repos if you want to build any of that: [here](https://github.com/alexthecat123/ESProFile) for ESProFile and [here](https://github.com/alexthecat123/ESFloppy) for ESFloppy (once I have it working).
 
+MiSTer/Verilator development note: the original Xilinx LisaFPGA board routes the
+Lisa's ProFile parallel-port signals to either the external ProFile connector or
+the onboard ESP32-based ESProFile. The ESProFile emulator is ESP32 firmware, not
+FPGA Verilog. The MiSTer port adds a separate internal SystemVerilog ProFile
+emulator in `rtl/profile.sv`; Verilator services its block-device requests with
+`verilator/sim/sim_blkdevice.cpp`.
+
 When you plug the LisaFPGA board into your computer, you'll see two ESP32-S3 devices show up, one for each emulator. These are the targets that you'll want to upload the ESProFile/ESFloppy code to if you're making any changes to them.
 
 For ESProFile, make sure that the ```#include "PinDefs_ESProFile.h"``` line in ```ESProFile.ino``` is commented out and that the line ```#include "PinDefs_LisaFPGA.h"``` is commented in. This will ensure that ESProFile uses the pin assignments for the LisaFPGA board as opposed to the standalone ESProFile board. This step is done automatically if you run the ```program_board.sh``` script.

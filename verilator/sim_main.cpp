@@ -58,8 +58,12 @@ struct SimOptions {
 	bool headless = false;
 	uint64_t cycles = 0;
 	uint64_t status_interval = 5000000;
+	uint64_t status_start = 0;
+	uint64_t stop_start = 0;
+	uint32_t stop_pc = 0xffffffff;
 	bool trace = false;
 	bool boot_profile = false;
+	bool dump_rom_state = false;
 	std::string profile_image = "profile.image";
 	std::string screenshot;
 };
@@ -76,8 +80,14 @@ static void PrintUsage(const char* argv0) {
 		"                     Headless: save the final VGA frame as a binary PPM image\n"
 		"  --boot-profile     Headless: select ProFile at the Lisa STARTUP FROM menu\n"
 		"  --trace            Enable 68k instruction trace output\n"
+		"  --dump-rom-state   Headless: print Lisa ROM scratch/error RAM at exit\n"
 		"  --status-interval <count>\n"
-		"                     Headless status interval in cycles; 0 disables (default: 5000000)\n",
+		"                     Headless status interval in cycles; 0 disables (default: 5000000)\n"
+		"  --status-start <count>\n"
+		"                     Headless: suppress periodic status before this cycle count\n"
+		"  --stop-pc <addr>   Headless: stop when CPU PC equals this address\n"
+		"  --stop-start <count>\n"
+		"                     Headless: ignore --stop-pc before this cycle count\n",
 		argv0);
 }
 
@@ -93,6 +103,8 @@ static bool ParseOptions(int argc, char** argv, SimOptions* options) {
 			options->boot_profile = true;
 		} else if (arg == "--trace") {
 			options->trace = true;
+		} else if (arg == "--dump-rom-state") {
+			options->dump_rom_state = true;
 		} else if (arg == "--profile" || arg == "--profile-image" || arg == "--proimage") {
 			if (++i >= argc) {
 				fprintf(stderr, "%s requires an image path\n", arg.c_str());
@@ -129,6 +141,30 @@ static bool ParseOptions(int argc, char** argv, SimOptions* options) {
 			options->status_interval = strtoull(argv[i], NULL, 0);
 		} else if (arg.rfind("--status-interval=", 0) == 0) {
 			options->status_interval = strtoull(arg.substr(18).c_str(), NULL, 0);
+		} else if (arg == "--status-start") {
+			if (++i >= argc) {
+				fprintf(stderr, "--status-start requires a count\n");
+				return false;
+			}
+			options->status_start = strtoull(argv[i], NULL, 0);
+		} else if (arg.rfind("--status-start=", 0) == 0) {
+			options->status_start = strtoull(arg.substr(15).c_str(), NULL, 0);
+		} else if (arg == "--stop-pc") {
+			if (++i >= argc) {
+				fprintf(stderr, "--stop-pc requires an address\n");
+				return false;
+			}
+			options->stop_pc = strtoul(argv[i], NULL, 0);
+		} else if (arg.rfind("--stop-pc=", 0) == 0) {
+			options->stop_pc = strtoul(arg.substr(10).c_str(), NULL, 0);
+		} else if (arg == "--stop-start") {
+			if (++i >= argc) {
+				fprintf(stderr, "--stop-start requires a count\n");
+				return false;
+			}
+			options->stop_start = strtoull(argv[i], NULL, 0);
+		} else if (arg.rfind("--stop-start=", 0) == 0) {
+			options->stop_start = strtoull(arg.substr(13).c_str(), NULL, 0);
 		} else {
 			fprintf(stderr, "Unknown option: %s\n", arg.c_str());
 			PrintUsage(argv[0]);
@@ -163,11 +199,18 @@ bool break_pending = false;
 bool old_vpb = false;
 bool headless_mode = false;
 uint64_t headless_status_interval = 5000000;
+uint64_t headless_status_start = 0;
 bool headless_boot_profile = false;
 bool headless_boot_profile_started = false;
+bool headless_startup_menu_request_started = false;
+size_t headless_startup_menu_request_step = 0;
 uint64_t headless_boot_profile_ready_time = 0;
 size_t headless_boot_profile_step = 0;
 std::string headless_screenshot_path;
+bool headless_dump_rom_state = false;
+uint32_t headless_stop_pc = 0xffffffff;
+uint64_t headless_stop_start = 0;
+bool headless_stop_requested = false;
 
 // HPS emulator
 // ------------
@@ -893,14 +936,102 @@ static uint32_t GetCpuD7()
 	       VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__regs68L[7];
 }
 
+static uint32_t GetCpuReg(int reg)
+{
+	return ((uint32_t)VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__regs68H[reg] << 16) |
+	       VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__regs68L[reg];
+}
+
+static uint16_t ReadSimRamWord(uint32_t byte_addr)
+{
+	return VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__sim_ram[(byte_addr >> 1) & 0xfffff];
+}
+
+static uint8_t ReadSimRamByte(uint32_t byte_addr)
+{
+	uint16_t word = ReadSimRamWord(byte_addr);
+	return (byte_addr & 1) ? (word & 0xff) : (word >> 8);
+}
+
+static uint16_t ReadSimRam16(uint32_t byte_addr)
+{
+	return ((uint16_t)ReadSimRamByte(byte_addr) << 8) |
+	       ReadSimRamByte(byte_addr + 1);
+}
+
+static uint32_t ReadSimRam32(uint32_t byte_addr)
+{
+	return ((uint32_t)ReadSimRam16(byte_addr) << 16) |
+	       ReadSimRam16(byte_addr + 2);
+}
+
+static void DumpSimRamRange(const char* label, uint32_t start, uint32_t bytes)
+{
+	fprintf(stderr, "%s @%06X:", label, start);
+	for (uint32_t offset = 0; offset < bytes; offset++) {
+		if ((offset % 16) == 0) {
+			fprintf(stderr, "\n  %06X:", start + offset);
+		}
+		fprintf(stderr, " %02x", ReadSimRamByte(start + offset));
+	}
+	fprintf(stderr, "\n");
+}
+
+static void DumpLisaRomState()
+{
+	uint32_t ldbase = ReadSimRam32(0x21c);
+	fprintf(stderr,
+		"ROMSTATE status=%08x d7sav=%08x bootdev=%02x bootdata=%02x %02x %02x %02x %02x %02x "
+		"maxmem=%08x totmem=%08x screen=%08x ld_fs_block0=%04x ldbase=%08x loaderr680=%08x\n",
+		ReadSimRam32(0x180),
+		ReadSimRam32(0x1ac),
+		ReadSimRamByte(0x1b3),
+		ReadSimRamByte(0x1b4),
+		ReadSimRamByte(0x1b5),
+		ReadSimRamByte(0x1b6),
+		ReadSimRamByte(0x1b7),
+		ReadSimRamByte(0x1b8),
+		ReadSimRamByte(0x1b9),
+		ReadSimRam32(0x294),
+		ReadSimRam32(0x2a8),
+		ReadSimRam32(0x110),
+		ReadSimRam16(0x210),
+		ldbase,
+		ReadSimRam32(0x680));
+	fprintf(stderr,
+		"CPUREGS D0=%08x D1=%08x D2=%08x D3=%08x D4=%08x D5=%08x D6=%08x D7=%08x "
+		"A0=%08x A1=%08x A2=%08x A3=%08x A4=%08x A5=%08x A6=%08x A7=%08x\n",
+		GetCpuReg(0), GetCpuReg(1), GetCpuReg(2), GetCpuReg(3),
+		GetCpuReg(4), GetCpuReg(5), GetCpuReg(6), GetCpuReg(7),
+		GetCpuReg(8), GetCpuReg(9), GetCpuReg(10), GetCpuReg(11),
+		GetCpuReg(12), GetCpuReg(13), GetCpuReg(14), GetCpuReg(15));
+	DumpSimRamRange("ROM exception area", 0x280, 0x20);
+	DumpSimRamRange("ROM boot data", 0x1b0, 0x30);
+	DumpSimRamRange("LDPROF scratch status", 0x800, 0x230);
+	if (ldbase < 0x200000) {
+		DumpSimRamRange("relocated loader head", ldbase, 0x40);
+		DumpSimRamRange("relocated loader descriptor", ldbase + 0x200, 0x40);
+	}
+}
+
 static bool CpuAtStartupFromMenu()
 {
 	uint32_t pc = GetCpuPc();
 	return pc >= 0xFE2DC0 && pc <= 0xFE2DDF;
 }
 
+static bool CpuAtInitialKeyboardScan()
+{
+	uint32_t pc = GetCpuPc();
+	return pc >= 0xFE11C0 && pc <= 0xFE1258;
+}
+
 static void DriveHeadlessProfileBoot()
 {
+	static const uint8_t startup_menu_keys[] = {
+		0xF2, // main-row 3 down: any non-Caps-Lock key asks ROM for STARTUP FROM menu
+		0x72, // main-row 3 up
+	};
 	static const uint8_t boot_keys[] = {
 		0xFF, // Apple down
 		0xF2, // main-row 3 down
@@ -909,6 +1040,20 @@ static void DriveHeadlessProfileBoot()
 	};
 
 	if (!headless_boot_profile_started) {
+		if (!headless_startup_menu_request_started && CpuAtInitialKeyboardScan() && !CpuAtStartupFromMenu()) {
+			headless_startup_menu_request_started = true;
+			fprintf(stderr, "headless: requesting STARTUP FROM menu at main_time=%llu pc=%06X\n",
+				(unsigned long long)main_time, GetCpuPc());
+		}
+		if (headless_startup_menu_request_started &&
+		    headless_startup_menu_request_step < sizeof(startup_menu_keys) &&
+		    VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__sim_cop_key_inject == 0) {
+			uint8_t key = startup_menu_keys[headless_startup_menu_request_step++];
+			VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__sim_cop_key_inject = key;
+			fprintf(stderr, "headless: queued startup-menu key 0x%02X at main_time=%llu pc=%06X\n",
+				key, (unsigned long long)main_time, GetCpuPc());
+			return;
+		}
 		if (main_time <= 100000000) {
 			return;
 		}
@@ -951,8 +1096,9 @@ static void PrintHeadlessStatus()
 		"COP{so=%02x ack=%02x kbdin=%02x in=%02x out=%02x kc=%02x,%02x,%02x,%02x dq=%d ra=%d idx=%d} "
 		"KBD{prb=%02x ddrb=%02x pcr=%02x acr=%02x ifr=%02x ier=%02x irq=%d pres=%d} "
 		"PP{prb=%02x ddrb=%02x penfall=%04x cmduedge=%04x cmdinen=%x} "
-		"PRO{state=%02x max=%02x cmd=%02x strb=%02x rdack=%02x cinrst=%x rst=%d pres=%d blk=%06x c0=%02x} "
-		"sd_rd=%03x sd_wr=%03x lba0=%u mounted=%03x\n",
+		"PRO{state=%02x max=%02x cmd=%02x strb=%02x rdack=%02x cinrst=%x rst=%d pres=%d blk=%06x c0=%02x stat0=%08x hdr0=%016llx} "
+		"sd_rd=%03x sd_wr=%03x lba0=%u mounted=%03x "
+		"BLK{cur=%d r=%d w=%d delay=%d byte=%d ack=%03x}\n",
 		(unsigned long long)main_time,
 		GetCpuPc(),
 		top->ON,
@@ -1008,10 +1154,18 @@ static void PrintHeadlessStatus()
 		VERTOPINTERN->emu__DOT__profile_i__DOT__pres_at_cmd,
 		VERTOPINTERN->emu__DOT__profile_i__DOT__block_num,
 		VERTOPINTERN->emu__DOT__profile_i__DOT__commandBuffer[0],
+		VERTOPINTERN->emu__DOT__profile_i__DOT__dbg_block0_status,
+		(unsigned long long)VERTOPINTERN->emu__DOT__profile_i__DOT__dbg_block0_hdr,
 		top->sd_rd,
 		top->sd_wr,
 		top->sd_lba[0],
-		top->img_mounted);
+		top->img_mounted,
+		blockdevice.current_disk,
+		blockdevice.reading,
+		blockdevice.writing,
+		blockdevice.ack_delay,
+		blockdevice.bytecnt,
+		top->sd_ack);
 }
 
 int verilate() {
@@ -1053,6 +1207,13 @@ int verilate() {
 				bus.BeforeEval();
 			}
 			top->eval();
+			if (headless_mode && headless_stop_pc != 0xffffffff &&
+			    main_time >= headless_stop_start && GetCpuPc() == headless_stop_pc) {
+				fprintf(stderr, "headless: stop-pc hit at main_time=%llu pc=%06X\n",
+					(unsigned long long)main_time, GetCpuPc());
+				PrintHeadlessStatus();
+				headless_stop_requested = true;
+			}
 
 			// Disassembly output
 			if (cpu_trace_enable) {
@@ -1106,7 +1267,9 @@ int verilate() {
 
 			// IWM EMULATION HERE (disabled for Lisa)
 
-			if (headless_mode && headless_status_interval != 0 && (main_time % headless_status_interval == 0)) {
+			if (headless_mode && headless_status_interval != 0 &&
+			    main_time >= headless_status_start &&
+			    (main_time % headless_status_interval == 0)) {
 				PrintHeadlessStatus();
 				fflush(stderr);
 			} else if (!headless_mode && main_time % 5000000 == 0) {
@@ -1152,6 +1315,18 @@ void RunHeadless(uint64_t max_cycles)
 	while (max_cycles == 0 || main_time < max_cycles) {
 		for (int i = 0; i < batch && (max_cycles == 0 || main_time < max_cycles); i++) {
 			verilate();
+			if (headless_stop_requested) {
+				break;
+			}
+		}
+		if (headless_stop_requested) {
+			break;
+		}
+	}
+	if (headless_mode) {
+		PrintHeadlessStatus();
+		if (headless_dump_rom_state) {
+			DumpLisaRomState();
 		}
 	}
 	fprintf(stderr, "headless complete: main_time=%llu ON=%d reset=%d pwrsw_n=%d\n",
@@ -1185,8 +1360,12 @@ int main(int argc, char** argv, char** env) {
 	}
 	headless_mode = options.headless;
 	headless_status_interval = options.status_interval;
+	headless_status_start = options.status_start;
+	headless_stop_pc = options.stop_pc;
+	headless_stop_start = options.stop_start;
 	headless_boot_profile = options.boot_profile;
 	headless_screenshot_path = options.screenshot;
+	headless_dump_rom_state = options.dump_rom_state;
 	cpu_trace_enable = options.trace;
 
 	// Create core and initialise

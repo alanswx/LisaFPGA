@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <iostream>
 #include <fstream>
 #include "verilated.h"
@@ -37,7 +38,7 @@ public:
 	bool mountQueue[kVDNUM];
 	std::fstream disk[kVDNUM];
 
-	void BeforeEval(int cycles);
+	void BeforeEval(uint64_t cycles);
 	void AfterEval(void);
 	//void QueueDownload(std::string file, int index);
 	//void QueueDownload(std::string file, int index, bool restart);

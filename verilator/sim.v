@@ -200,7 +200,8 @@ module emu (
         .sd_buff_dout(sd_buff_dout),
         .sd_buff_din(sd_buff_din[0]),
         .sd_buff_wr(sd_buff_wr),
-        .img_mounted(profile_img_mounted)
+        .img_mounted(profile_img_mounted),
+        .img_size(img_size)
     );
 
     // Initialize unused sd_lba and sd_buff_din

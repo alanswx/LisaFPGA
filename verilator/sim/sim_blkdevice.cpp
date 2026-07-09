@@ -52,112 +52,101 @@ void SimBlockDevice::MountDisk( std::string file, int index) {
 }
 
 
-void SimBlockDevice::BeforeEval(int cycles)
+void SimBlockDevice::BeforeEval(uint64_t cycles)
 {
-//
-// switch to a new disk if current_disk is -1
-// check to see if we need a read or a write or a mount
-//
+    if (cycles < 2000) return;
 
-// wait until the computer boots to start mounting, etc
- if (cycles<2000) return;
+    *this->sd_buff_wr = 0;
 
- for (int i=0; i<kVDNUM;i++)
- {
-
-//fprintf(stderr,"current_disk = %d *sd_rd %x ack_delay %x reading %d writing %d\n",current_disk,*sd_rd,ack_delay,reading,writing);
-
-    if (current_disk == i) {
-    // send data
-    if (ack_delay==1) {
-      if (reading && (*this->sd_buff_wr==0) &&  (bytecnt<256)) {
-         uint8_t low = disk[i].get();
-         uint8_t high = disk[i].get();
-         *this->sd_buff_dout = (high << 8) | low;
-         *this->sd_buff_addr = bytecnt++;
-         *this->sd_buff_wr= 1;
-      } else if(writing && *this->sd_buff_addr != bytecnt && (*this->sd_buff_addr< 256)) {
-        uint16_t val = *(this->sd_buff_din[i]);
-        disk[i].put(val & 0xFF);
-        disk[i].put((val >> 8) & 0xFF);
-        *this->sd_buff_addr = bytecnt;
-      } else {
-	  *this->sd_buff_wr=0;
-
-	  if (writing) {
-		  if (bytecnt>=256) {
-			  writing=0;
-			  //printf("writing stopped: bytecnt %x sd_buff_addr %x \n",bytecnt,*sd_buff_addr);
-		  }
-		  if (bytecnt<256)
-		  	bytecnt++;
-	  }
-	  else if (reading) {
-        	if(bytecnt == 256) {
-          	 	reading = 0;
-        	} 
+    for (int i = 0; i < kVDNUM; i++) {
+        if (!reading && !writing && mountQueue[i] && !*this->img_mounted) {
+            fprintf(stderr, "mounting.. %d\n", i);
+            mountQueue[i] = 0;
+            *this->img_size = disk_size[i];
+            *this->img_readonly = 0;
+            fprintf(stderr, "img_size .. %llu\n", (unsigned long long)*this->img_size);
+            disk[i].seekg(0);
+            bitset(*this->img_mounted, i);
+            ack_delay = 1200;
+            return;
         }
-      }
-    } else {
-	  *this->sd_buff_wr=0;
-    } 
+
+        if (ack_delay > 1 && bitcheck(*this->img_mounted, i)) {
+            ack_delay--;
+            return;
+        }
+
+        if (ack_delay == 1 && bitcheck(*this->img_mounted, i)) {
+            fprintf(stderr, "mounting flag cleared  %d\n", i);
+            bitclear(*this->img_mounted, i);
+            ack_delay = 0;
+            return;
+        }
     }
 
-    // issue a mount if we aren't doing anything, and the img_mounted has no bits set
-    if (!reading && !writing && mountQueue[i] && !*this->img_mounted) {
-fprintf(stderr,"mounting.. %d\n",i);
-           mountQueue[i]=0;
-           *this->img_size = disk_size[i];
-	   *this->img_readonly=0;
-	fprintf(stderr,"img_size .. %llu\n",(unsigned long long)*this->img_size);
-           disk[i].seekg(0);
-           bitset(*this->img_mounted,i);
-           ack_delay=1200;
-    } else if (ack_delay==1 && bitcheck(*this->img_mounted,i) ) {
-fprintf(stderr,"mounting flag cleared  %d\n",i);
-        bitclear(*this->img_mounted,i) ;
-        //*img_size = 0;
-    } else { if (!reading && !writing && ack_delay>0 && current_disk != i) ack_delay--; }
+    if (current_disk < 0 && !reading && !writing && ack_delay == 0) {
+        for (int i = 0; i < kVDNUM; i++) {
+            bool want_read = bitcheck(*this->sd_rd, i);
+            bool want_write = bitcheck(*this->sd_wr, i);
+            if (!want_read && !want_write) continue;
 
-    // start reading when sd_rd pulses high
-    bool request_active = (bitcheck(*this->sd_rd,i) || bitcheck(*this->sd_wr,i));
-    if ((current_disk==-1 || current_disk==i) && request_active) {
-       // set current disk here..
-//fprintf(stderr,"setting current disk %d %x ack_delay %x\n",i,*sd_rd,ack_delay);
-       current_disk=i;
-      if (!ack_delay) {
-        int lba = *(this->sd_lba[i]);
-        if (bitcheck(*this->sd_rd,i)) {
-        	reading = true;
-	} 
-        if (bitcheck(*this->sd_wr,i)) {
-        	writing = true;
-	} 
+            current_disk = i;
+            reading = want_read;
+            writing = want_write;
+            bytecnt = 0;
+            *this->sd_buff_addr = 0;
 
-        disk[i].clear();
-        disk[i].seekg((lba) * kBLKSZ);
-        bytecnt = 0;
-        *this->sd_buff_addr = 0;
-        ack_delay = 1200;
-      }
+            int lba = *(this->sd_lba[i]);
+            disk[i].clear();
+            disk[i].seekg(lba * kBLKSZ);
+            ack_delay = 1200;
+            break;
+        }
     }
 
-    if (current_disk == i) {
-      if (ack_delay==1 && !reading && !writing) {
-           bitset(*this->sd_ack,i);
-		   //printf("setting sd_ack: %x\n",*sd_ack);
-      } else {
-           bitclear(*this->sd_ack,i);
-	   //printf("clearing sd_ack: %x\n",*sd_ack);
-      }
-      if (ack_delay > 1)
+    if (current_disk < 0) return;
+
+    if (ack_delay > 1) {
+        bitclear(*this->sd_ack, current_disk);
         ack_delay--;
-      else if (ack_delay == 1 && !reading && !writing && !request_active)
-        ack_delay--;
-      if (ack_delay==0 && !reading && !writing) 
-	current_disk=-1;
+        return;
     }
-  }
+
+    if (reading) {
+        if (bytecnt < 256) {
+            uint8_t low = disk[current_disk].get();
+            uint8_t high = disk[current_disk].get();
+            *this->sd_buff_dout = (high << 8) | low;
+            *this->sd_buff_addr = bytecnt++;
+            *this->sd_buff_wr = 1;
+            bitclear(*this->sd_ack, current_disk);
+            return;
+        }
+        reading = false;
+    } else if (writing) {
+        if (*this->sd_buff_addr != bytecnt && *this->sd_buff_addr < 256) {
+            uint16_t val = *(this->sd_buff_din[current_disk]);
+            disk[current_disk].put(val & 0xFF);
+            disk[current_disk].put((val >> 8) & 0xFF);
+            *this->sd_buff_addr = bytecnt;
+        }
+        if (bytecnt < 256) {
+            bytecnt++;
+            bitclear(*this->sd_ack, current_disk);
+            return;
+        }
+        writing = false;
+    }
+
+    bitset(*this->sd_ack, current_disk);
+
+    bool request_active =
+        bitcheck(*this->sd_rd, current_disk) || bitcheck(*this->sd_wr, current_disk);
+    if (!request_active) {
+        bitclear(*this->sd_ack, current_disk);
+        ack_delay = 0;
+        current_disk = -1;
+    }
 }
 
 void SimBlockDevice::AfterEval()

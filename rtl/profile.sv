@@ -32,7 +32,8 @@ module profile (
     input  wire [15:0] sd_buff_dout,    // Data from HPS to FPGA
     output wire [15:0] sd_buff_din,     // Data from FPGA to HPS
     input  wire        sd_buff_wr,      // Buffer write enable from HPS
-    input  wire        img_mounted      // Disk image mounted
+    input  wire        img_mounted,     // Disk image mounted
+    input  wire [63:0] img_size         // Mounted disk image size in bytes
 );
 
     // Tri-state buffer control for parallel data bus
@@ -145,6 +146,23 @@ module profile (
         8'h43, 8'h61, 8'h6D, 8'h65, 8'h6F, 8'h2F, 8'h41, 8'h70, 8'h68, 8'h69, 8'h64, 8'h20, 8'h30, 8'h30, 8'h30, 8'h31
     };
 
+    wire img_is_10mb_profile = (img_size == 64'd10350592);
+
+    function automatic [7:0] spare_table_byte(input [5:0] index);
+        begin
+            unique case (index)
+                6'd8:  spare_table_byte = img_is_10mb_profile ? 8'h31 : spareTable[index];
+                6'd9:  spare_table_byte = img_is_10mb_profile ? 8'h30 : spareTable[index];
+                6'd10: spare_table_byte = img_is_10mb_profile ? 8'h4D : spareTable[index];
+                6'd15: spare_table_byte = img_is_10mb_profile ? 8'h10 : spareTable[index];
+                6'd16: spare_table_byte = img_is_10mb_profile ? 8'h04 : spareTable[index];
+                6'd17: spare_table_byte = img_is_10mb_profile ? 8'h04 : spareTable[index];
+                6'd19: spare_table_byte = img_is_10mb_profile ? 8'h4C : spareTable[index];
+                default: spare_table_byte = spareTable[index];
+            endcase
+        end
+    endfunction
+
     reg [9:0] data_idx; // up to 536 bytes
     reg [7:0] temp_data;
     reg       is_spare_read;
@@ -158,6 +176,7 @@ module profile (
     wire hit_C = !need_C || (cache_sec2_valid && (cache_sec2_tag == sec_C));
     wire [10:0] data_rel_addr = {2'b00, block_offset} + ({1'b0, data_idx} - 11'd4);
     wire [10:0] write_rel_addr = {2'b00, block_offset} + {1'b0, data_idx};
+    wire [5:0] spare_read_index = data_idx[5:0] - 6'd4;
 
     // Cache word address (10-bit) from a slot + 9-bit byte offset (word = byte
     // address >> 1); the even/odd lane is selected by the byte-address LSB.
@@ -396,6 +415,7 @@ module profile (
                     _BSY <= 1'b1; // Ready for data strobe
                     data_idx <= 0;
                     pd_oe <= 1'b1;
+                    pd_out <= 8'h00; // First status byte must be valid before BSY releases.
                     state <= ST_READ_DATA_1;
                 end
 
@@ -405,7 +425,7 @@ module profile (
                         pd_out <= 8'h00; // Status bytes 0-3 are zero
                     end else begin
                         if (is_spare_read) begin
-                            pd_out <= ((data_idx - 4) < 48) ? spareTable[data_idx - 4] : 8'hFF;
+                            pd_out <= ((data_idx - 4) < 48) ? spare_table_byte(spare_read_index) : 8'hFF;
                         end else begin
                             // Async LUT-RAM read of the selected lane (shared port).
                             pd_out <= pf_rd_lane ? odd_q : even_q;
@@ -659,6 +679,8 @@ module profile (
     reg rst_at_cmd /*verilator public_flat_rd*/ = 0;
     reg pres_at_cmd /*verilator public_flat_rd*/ = 1;
     reg [3:0] cmd_in_rst /*verilator public_flat_rd*/ = 0;
+    reg [31:0] dbg_block0_status /*verilator public_flat_rd*/ = 0;
+    reg [63:0] dbg_block0_hdr /*verilator public_flat_rd*/ = 0;
     always_ff @(posedge clk) begin
         if (state > max_state) max_state <= state;
         cmd_d <= _CMD; strb_d <= _PSTRB; rd_ack_d <= (sd_rd & sd_ack);
@@ -669,6 +691,28 @@ module profile (
             rst_at_cmd  <= reset;
             pres_at_cmd <= _PRES;
             cmd_in_rst  <= cmd_in_rst + 4'd1;
+        end
+        if (state == ST_CMD_DECODE && commandBuffer[0] == 8'h00 &&
+            {commandBuffer[1], commandBuffer[2], commandBuffer[3]} == 24'h000000) begin
+            dbg_block0_status <= 32'h0;
+            dbg_block0_hdr <= 64'h0;
+        end
+        if (state == ST_READ_DATA_2 && pstrb_falling && !is_spare_read && block_num == 24'h000000) begin
+            unique case (data_idx)
+                10'd0: dbg_block0_status[31:24] <= pd_out;
+                10'd1: dbg_block0_status[23:16] <= pd_out;
+                10'd2: dbg_block0_status[15:8]  <= pd_out;
+                10'd3: dbg_block0_status[7:0]   <= pd_out;
+                10'd4: dbg_block0_hdr[63:56] <= pd_out;
+                10'd5: dbg_block0_hdr[55:48] <= pd_out;
+                10'd6: dbg_block0_hdr[47:40] <= pd_out;
+                10'd7: dbg_block0_hdr[39:32] <= pd_out;
+                10'd8: dbg_block0_hdr[31:24] <= pd_out;
+                10'd9: dbg_block0_hdr[23:16] <= pd_out;
+                10'd10: dbg_block0_hdr[15:8] <= pd_out;
+                10'd11: dbg_block0_hdr[7:0]  <= pd_out;
+                default: ;
+            endcase
         end
     end
 endmodule

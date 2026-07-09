@@ -1,25 +1,65 @@
-# Lisa MiSTer Core — Quartus / Hardware Bring-up Handoff
+# Lisa MiSTer Core - Bring-Up Notes
 
 Target: Cyclone V, DE10-Nano `5CSEBA6U23I7`, Quartus 17.0.2.
-Board reachable at **192.168.1.196** (MiSTer Remote API on `:8182`, SSH root/`1`,
-USB-Blaster JTAG as "DE-SoC").
 
-## Current status (as of this handoff)
+## Current Status - 2026-07-09
 
-- **Builds clean**: `quartus_sh --flow compile Lisa` → 0 errors, produces
-  `output_files/Lisa.sof` + `Lisa.rbf`. Timing essentially closed
-  (~−0.6 ns worst setup; see §5).
-- **Runs on hardware and boots**: the core powers on, comes out of reset, runs at
-  **60 fps**, and the framework detects the correct **720×364** resolution (shown
-  in the MiSTer OSD).
-- **KNOWN REMAINING ISSUE — video content**: the screen is **black with a single
-  white vertical line**. Geometry/timing is correct; the *picture content* is not
-  the expected Lisa boot screen. This is the next thing to debug (see §6).
-- **⚠️ The working tree has UNCOMMITTED changes** beyond commit `bfd2755`
-  (the single-clock conversion). All the hardware bring-up fixes + debug
-  instrumentation below are uncommitted. Decide what to keep before committing.
-- **⚠️ Debug instrumentation is still compiled in** and must be removed for a clean
-  release build (see §4).
+- **Video is solved** in the simulator and previous hardware bring-up notes. The
+  earlier black/white-line and horizontal alignment issues are historical.
+- **Simulator RAM is set to 2MB** so Lisa Office System can load. The earlier
+  `10727` Lisa OS loader error was memory exhaustion with the smaller simulated
+  RAM configuration.
+- **The original Xilinx LisaFPGA board did not include a Verilog ProFile disk
+  emulator.** It muxed the Lisa parallel-port signals to either a real external
+  ProFile connector or the onboard ESP32-based ESProFile emulator.
+- **The MiSTer port now has an internal Verilog ProFile emulator**
+  (`rtl/profile.sv`). It uses MiSTer/HPS block-device signals on hardware and
+  `verilator/sim/sim_blkdevice.cpp` as the Verilator stand-in.
+- **Current active issue:** get Lisa Office System booting from a mounted ProFile
+  image through the internal emulator. The latest work fixed the Verilator mount
+  delay/`sd_ack` handoff, fixed a 32-bit simulator cycle-counter overflow that
+  blocked late ProFile reads, matched ESProFile's 10MB spare-table fields, and
+  matched ESProFile's read timing by preloading the first status byte before
+  releasing `_BSY`.
+- **Block-0 ProFile validation now passes in long Verilator traces.** Lisa ROM
+  error `84` is `BADHDR`, but current status output shows
+  `hdr0=00000022aaaa8200` for the LOS 3.0 image. The remaining failure occurs
+  later: loaded ProFile boot code executes around `0x207F34..0x207F38`, then the
+  system returns to ROM/monitor code.
+
+## Current Verification Loop
+
+```bash
+cd verilator
+make
+./obj_dir/Vemu --headless --boot-profile \
+  --profile "Lisa Office System 3.0 and Workshop 3.0.image" \
+  --cycles 3800000000 \
+  --status-interval 500000000 \
+  --screenshot /tmp/lisa.ppm
+```
+
+Interpretation:
+
+- `PRO{state=1b}` is `profile.sv` waiting in `ST_HPS_READ`.
+- `sd_rd=001` should cause the Verilator backend to stream one 512-byte sector
+  and assert `sd_ack[0]`.
+- If `rdack` advances, the HPS/block-device handoff worked and the next suspect
+  is ProFile command/status/data behavior.
+- `stat0`/`hdr0` in the headless status line capture the first status bytes and
+  first eight block-0 header bytes delivered by the emulator. The LOS 3.0 image
+  should begin `hdr0=00000022aaaa8200`; current traces do.
+- The LOS 3.0 image is already in physical ProFile interleave order. `LDPROF`'s
+  9:1 software interleave maps logical boot blocks to valid checksummed physical
+  blocks.
+- LisaEm's ProFile emulator is a useful protocol cross-check, but its media
+  path is DC42-normalized: it applies `deinterleave5()` before reading the image.
+  Do not copy that mapping into the RTL for these raw `.image` files unless the
+  simulator gains an explicit DC42/normalized-image mode.
+
+The notes below are historical bring-up details. They are useful for root-cause
+context, but the section headings that mention old "current" states should be
+read as snapshots from those sessions.
 
 ---
 
@@ -37,7 +77,7 @@ one-cycle **clock-enable strobe** (`@(posedge clk_sys) if (x_en)`).
 - `z8530_scc` (SCC) and `AM9512_FPU` run on raw `clk_sys` (serial/FPU rate
   deferred — non-critical for bring-up). See `todo.md`.
 
-## 2. Hardware bring-up fixes (UNCOMMITTED)
+## 2. Historical Hardware Bring-Up Fixes
 
 Found via JTAG instrumentation on the real board. All were pre-existing latent
 bugs exposed on the first hardware boot (the core had only ever been simulated).
@@ -83,10 +123,12 @@ You can also JTAG-program the `.sof` directly with
 `quartus_pgm -c DE-SoC -m jtag -o "p;output_files/Lisa.sof@2"` (device @2 is the
 5CSEBA6), but launching the `.rbf` via the API is cleaner (proper HPS/hps_io init).
 
-## 4. Debug instrumentation currently compiled in (REMOVE for release)
+## 4. Historical Debug Instrumentation
 
-Added for bring-up; read/controlled over JTAG with `quartus_stp`. Scripts are in
-the session scratchpad (`read_probe.tcl`, `poke_probe.tcl`, `read_video.tcl`).
+Added for bring-up; read/controlled over JTAG with `quartus_stp`. Some probes
+have since moved or been removed during later cleanup. Treat this section as a
+map of what existed during the hardware bring-up sessions, not a guaranteed list
+of what is compiled into the current tree.
 
 - `rtl/debug_issp.sv` — ISSP instance **"LDBG"**: probe reports pll_locked / ON /
   reset / frame-rate; source can override speed-select and force the core on.
@@ -97,10 +139,10 @@ the session scratchpad (`read_probe.tcl`, `poke_probe.tcl`, `read_video.tcl`).
 - Extra ports threaded top↔Lisa for debug: `pll_locked`, `pixel_ce`, `dbg_va`,
   `dbg_clr`.
 
-To remove: delete `debug_issp.sv` (+ its `files.qip` line and `u_debug_issp`
-instance), the `u_vid_probe` block in `Lisa.sv`, and the debug-only ports/overrides
-in `top.sv`. KEEP: `pixel_ce`/`CE_PIXEL`, the DE reconstruction, the auto power-on,
-the speed-map fix, the SDC fix — those are real fixes.
+For a release build, audit the current tree for `debug_issp`, ISSP instances,
+and public debug-only ports. Keep the real fixes: `pixel_ce`/`CE_PIXEL`, DE
+reconstruction, auto power-on, speed-map fix, SDC fix, explicit bus muxes, and
+other Quartus tri-state-resolution fixes.
 
 Reading a probe (needs `package require ::quartus::insystem_source_probe`, and
 `get_insystem_source_probe_instance_info` must be called BEFORE
@@ -116,20 +158,16 @@ the `clk_sys` domain (a few paths, likely the SCC/FPU on raw clk_sys). Close wit
 `set_multicycle_path`/`set_false_path` on those blocks or the deferred SCC/FPU
 enable conversion. Details in `todo.md`.
 
-## 6. Next steps (priority order)
+## 6. Current Next Steps
 
-1. **Video content bug (black screen + white vertical line).** Geometry is right
-   (720×364) but the picture is wrong. Investigate: is the CPU actually executing
-   the boot ROM (add a CPU-liveness probe: watch fx68k address/bus activity)? Is
-   the framebuffer being written/read (video RAM path)? Is `VID` polarity /
-   pixel-shift correct? The single white line on black is the key clue — it may be
-   one column of the raster with everything else blanked, pointing at the video
-   fetch/shift path (CPU_board `vid_shift_reg`, `vid_addr_counter`) under the new
-   clk_sys+dotck_en clocking. Compare against a simulation of the same scene.
-2. Remove the debug instrumentation (§4) once the picture is correct.
-3. Close timing (§5) and do the deferred SCC/FPU enable conversion (`todo.md`).
-4. Functional check of keyboard/mouse via the COP, and SCC serial.
-5. Decide what to commit (working tree is currently dirty beyond `bfd2755`).
+1. Finish ProFile boot validation in Verilator using the 2MB RAM configuration
+   and a mounted Lisa Office System ProFile image.
+2. If the simulator reaches a Lisa boot error, capture the screenshot and decode
+   the exact on-screen error before changing RTL.
+3. Once the simulator shows a useful result, test the same ProFile path on FPGA.
+4. Audit and remove/gate debug-only probes for a clean release build.
+5. Close remaining timing warnings and do the deferred SCC/FPU enable conversion
+   described in `todo.md`.
 
 ---
 
@@ -256,7 +294,7 @@ Findings/changes this session (all uncommitted, on top of the earlier dirty tree
   and would end the 6800 cycle before its E data phase — matching "0xFF
   writes complete but never coincide with a CS window". Detectors for this
   (LCPU[1:0]: SPIO_low-in-VPA-cycle, earlyack=_CDACK-while-VMA-idle) are in
-  the current build. If confirmed, chase the _SPIO decode (MMU/MALE latch
+  that build. If confirmed, chase the _SPIO decode (MMU/MALE latch
   timing, possibly Quartus-vs-Vivado tri-state resolution of the muxed A bus)
   and consider gating the _SPIO ack term with registered/latched decode.
 - Housekeeping: two "Top-level design entity Lisa is undefined" build
@@ -413,7 +451,7 @@ INVID polarity, OSD ROM labels. See git diff. Remaining: strip debug probes
 (LVID/LVI2/LCPU/LIO/LCOP/LKBD/LMOU/LRAM/LDBG) for release; close timing; SCC/FPU
 enable conversion; confirm ProFile actually boots an OS.
 
-### ProFile boot debugging (session 2026-07-06 late) — diagnosis, not yet fixed
+### Historical ProFile boot debugging (session 2026-07-06 late)
 
 Instrumented profile.sv with ISSP probe **"LPRO"** (FSM state / max_state,
 command, block#, _CMD/_PSTRB edge counts, SD rd_acks, img_mounted, _PRES) and
