@@ -807,7 +807,8 @@ module emu (
         .sd_buff_dout(sd_buff_dout),
         .sd_buff_din(sd_buff_din[0]),
         .sd_buff_wr(sd_buff_wr),
-        .img_mounted(img_mounted)
+        .img_mounted(img_mounted),
+        .img_size(img_size)
     );
 
     // Auto power-on: the Lisa's COP only powers the machine on when it sees a

@@ -681,12 +681,24 @@ module profile (
     reg [3:0] cmd_in_rst /*verilator public_flat_rd*/ = 0;
     reg [31:0] dbg_block0_status /*verilator public_flat_rd*/ = 0;
     reg [63:0] dbg_block0_hdr /*verilator public_flat_rd*/ = 0;
+    // DEBUG: SD-side capture to see whether the HPS actually loads real data into
+    // the cache on hardware (block-0 hdr came back all-zero on the FPGA).
+    reg [15:0] dbg_sd_fileid = 0;    // sd_buff_dout when writing slot0 word 2 (FILEID)
+    reg [7:0]  dbg_sd_wr_cnt = 0;    // count of sd_buff_wr (cache load words)
+    reg [7:0]  dbg_rd_data_cnt = 0;  // count of ST_READ_DATA_2 byte deliveries
+    reg [31:0] dbg_sd_lba_last = 0;  // last requested SD sector
     always_ff @(posedge clk) begin
         if (state > max_state) max_state <= state;
         cmd_d <= _CMD; strb_d <= _PSTRB; rd_ack_d <= (sd_rd & sd_ack);
         if (cmd_d && !_CMD)   cmd_edges  <= cmd_edges + 8'd1;
         if (strb_d && !_PSTRB) strb_edges <= strb_edges + 8'd1;
         if (!rd_ack_d && (sd_rd & sd_ack)) rd_acks <= rd_acks + 8'd1;
+        if (sd_buff_wr) begin
+            dbg_sd_wr_cnt <= dbg_sd_wr_cnt + 8'd1;
+            if (active_slot == 2'd0 && sd_buff_addr == 8'd2) dbg_sd_fileid <= sd_buff_dout;
+        end
+        if (state == ST_READ_DATA_2 && pstrb_falling) dbg_rd_data_cnt <= dbg_rd_data_cnt + 8'd1;
+        if (sd_rd) dbg_sd_lba_last <= sd_lba;
         if (cmd_d && !_CMD && (reset || _PRES == 1'b0)) begin
             rst_at_cmd  <= reset;
             pres_at_cmd <= _PRES;
@@ -715,6 +727,25 @@ module profile (
             endcase
         end
     end
+
+    // DEBUG (ISSP "LPRO"/"LPR2", remove for release): expose the captured block-0
+    // header/status + FSM state over JTAG so we can see what the ProFile emulator
+    // delivers on real HARDWARE (the Verilator sim reads these via public_flat_rd;
+    // the FPGA needs a probe). LPRO = dbg_block0_hdr (block bytes 0-7; FILEID is
+    // bits [31:16] and must be 0xAAAA). LPR2 = status + max_state + live signals.
+    altsource_probe #(
+        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
+        .instance_id ("LPRO"), .probe_width (64), .source_width (1),
+        .source_initial_value ("0"), .enable_metastability ("NO")
+    ) u_pro_hdr_probe ( .source(), .probe(dbg_block0_hdr),
+        .source_clk(clk), .source_ena(1'b1) );
+    altsource_probe #(
+        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
+        .instance_id ("LPR2"), .probe_width (64), .source_width (1),
+        .source_initial_value ("0"), .enable_metastability ("NO")
+    ) u_pro_st_probe ( .source(), .probe({ dbg_sd_fileid, dbg_sd_wr_cnt,
+        rd_acks, dbg_rd_data_cnt, max_state, dbg_sd_lba_last[15:0], 3'd0 }),
+        .source_clk(clk), .source_ena(1'b1) );
 endmodule
 
 // Simple 1-write / 1-async-read LUT-RAM. The canonical pattern below maps to
