@@ -1638,7 +1638,7 @@ module IO_board(
         .source_initial_value ("0"), .enable_metastability ("NO")
     ) u_cop_probe ( .source(), .probe({
         kc0, kc1, kc2, kc3,
-        dbg_so_cnt, dbg_kbdin_cnt,
+        dbg_so_cnt, dbg_l_in_last, // [23:16] = LIVE last COP->CPU keycode
         DATA_QUEUED_COP, READ_ACK_COP, _READY_COP, ON,
         KBD_mouse_mux_sel, KBD_reset_COP, KBD_in,
         KBD_out, port_b_out_KBD_VIA[0], KBD_via_DDRB[0], 5'd0

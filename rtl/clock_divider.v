@@ -15,7 +15,7 @@
 //   dotck_en    selectable: /4 (20.4MHz), /2 (40.75), 3-of-4 (~61.1), /1 (81.5)
 //   c16m_en     clk_sys / 5   -> 16.300032 MHz
 //   c5m_en      clk_sys / 16  ->  5.09376  MHz
-//   copck2x_en  ~3.90    MHz  (COPCK_2x)   phase accumulator
+//   copck2x_en  ~7.80    MHz  (COPCK_2x)   phase accumulator
 //   sccck2x_en  ~7.3728  MHz  (SCCCK_2x)   phase accumulator
 //   usbclk_en   ~12.00   MHz  (usbclk)     phase accumulator
 //
@@ -30,7 +30,7 @@ module clock_divider (
     output wire        dotck_en,    // DOTCK rising-edge strobe (rate per speed_sel)
     output wire        c16m_en,     // 16.300032 MHz strobe
     output wire        c5m_en,      //  5.09376  MHz strobe
-    output wire        copck2x_en,  //  3.90     MHz strobe
+    output wire        copck2x_en,  //  7.80     MHz strobe
     output wire        sccck2x_en,  //  7.3728   MHz strobe
     output wire        usbclk_en    // 12.00     MHz strobe
 );
@@ -81,10 +81,15 @@ module clock_divider (
     end
     assign c5m_en = (c5m_cnt == 4'd0);
 
-    // --- COPCK_2x enable ~3.90 MHz (phase accumulator, carry-out strobe) ----
-    // inc = round((3.90 / 81.50016) * 2^32) = 205530663
+    // --- COPCK_2x enable ~7.80 MHz (phase accumulator, carry-out strobe) ----
+    // COPCK_2x is the COP clock x2 (COPCK itself = 3.90 MHz, derived as
+    // copck2x_en/2 in top.sv). Upstream (alexthecat123) clocks the COP from a
+    // 7.8 MHz COPCK_2x net; ours was generating 3.90 MHz here (half rate), so
+    // the COP sampled the serial keyboard 2x too slow and garbled every key
+    // (e.g. reset 0x80->0x85, 'A' 0xF0->0x30). Corrected to 7.80 MHz.
+    // inc = round((7.80 / 81.50016) * 2^32) = 411061326
     reg [31:0] copck_acc = 32'd0;
-    wire [32:0] copck_sum = {1'b0, copck_acc} + 33'd205530663;
+    wire [32:0] copck_sum = {1'b0, copck_acc} + 33'd411061326;
     always @(posedge clk_sys) begin
         copck_acc <= copck_sum[31:0];
     end
