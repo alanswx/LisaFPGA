@@ -256,7 +256,7 @@ module emu (
         .D_SRAM(),
 
         // Floppy (unimplemented stubs)
-        .RAM_SEL(2'b00), // 512KB, matching top.sv's SIMULATION block-RAM board
+        .RAM_SEL(2'b11),
         .ESFLOPPY_COMM_BUS(),
         .RDA_ESFLOPPY(1'b1),
         .WRD_ESFLOPPY(),

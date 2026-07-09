@@ -1163,51 +1163,10 @@ module top(
     //  BD tri-state bug and was too large to keep in the device.)
 
     `ifdef SIMULATION
-        // If we're simulating, just instantiate a single 512KB memory board; it's the only one that supports block RAM
-        mem_board_512k slot1(
-            .RA(RA),
-            .A17(A17),
-            .A18(A18),
-            .A19(A19),
-            .A20(A20),
-            .VA9(VA9B),
-            .VA10(VA10B),
-            .clk_sys(clk_sys),
-        .dotck_en(dotck_en),
-            ._UDS(_UDS),
-            ._LDS(_LDS),
-            ._CAS(_CAS),
-            ._RAS(_RAS),
-            .MREAD(MREAD),
-            .SLOT(1'b1),
-            ._RFSH(_R1),
-            .T1(T1),
-            .T2(T2),
-            .T3(T3),
-            .A16(A16),
-            .S1(1'b0),
-            .S2(1'b0),
-            .S3(1'b0),
-            .MD_IN(MD_OUT),
-            .MD_OUT(MD_IN),
-            ._HDER_in(_HDER),
-            ._HDER_out(_HDER_MEM),
-            .HDER_OE(HDER_OE_MEM),
-            ._SFER_in(_SFER),
-            ._SFER_out(_SFER_MEM),
-            .SFER_OE(SFER_OE_MEM),
-            ._CE_SRAM(_CE_SRAM),
-            ._OE_SRAM(_OE_SRAM),
-            ._WE_SRAM(_WE_SRAM),
-            ._UDS_SRAM(_UDS_SRAM),
-            ._LDS_SRAM(_LDS_SRAM),
-            .A_SRAM(A_SRAM),
-            .DIN_SRAM(DIN_SRAM),
-            .DOUT_SRAM(DOUT_SRAM),
-            .SRAM_BUS_DIR(SRAM_BUS_DIR)
-        );
+        // In simulation, mem_board_2mb uses an internal RAM model in SDRAM_Controller_Flat.
     `else
-        // Otherwise, instantiate a 2MB memory board; it uses the external SDRAM chip
+        // On hardware, mem_board_2mb drives the external SRAM chip.
+    `endif
         mem_board_2mb slot1(
             .RA(RA),
             .A16(A16),
@@ -1241,6 +1200,5 @@ module top(
             .DOUT_SRAM(DOUT_SRAM),
             .SRAM_BUS_DIR(SRAM_BUS_DIR)
         );
-    `endif
 
 endmodule
