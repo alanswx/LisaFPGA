@@ -1021,9 +1021,18 @@ module IO_board(
 
     // Now we need to gate all those ungated ProFile control signals with the ProFile communications enable signal
     // Make sure to use the E-sampled versions of the signals, not the raw ones
-    assign DR_W = (~_ProFile_EN) ? PR_W_E_sampled : 1'b1;
-    assign _PSTRB = (~_ProFile_EN) ? _PSTRB_E_sampled : 1'b1;
-    assign _CMD = (~_ProFile_EN) ? _CMD_E_sampled : 1'b1;
+    // Feed the ProFile emulator the RAW (un-E-sampled) Lisa->drive control
+    // signals. The emulator runs on clk_sys (81.5MHz) and must respond to each
+    // per-byte _PSTRB strobe within the host's strobe->next-read window; the
+    // E-sampling added up to ~0.5us of latency, so an occasionally-short window
+    // let the host read a stale/mid-transition byte -> intermittent read
+    // corruption (ProFile "boot device read failed" / crashes deep into the OS
+    // load). Raw signals cut the emulator's strobe response to a few clk_sys
+    // cycles. (The reverse-direction _BSY / parity into the E-clocked VIA stay
+    // E-sampled — see _BSY_E_sampled / latched_parity_in_E_sampled above.)
+    assign DR_W = (~_ProFile_EN) ? PR_W_ungated : 1'b1;
+    assign _PSTRB = (~_ProFile_EN) ? _PSTRB_ungated : 1'b1;
+    assign _CMD = (~_ProFile_EN) ? _CMD_ungated : 1'b1;
     assign OCD_ungated = (~_ProFile_EN) ? OCD : 1'b1;
     //assign _BSY_ungated = (~_ProFile_EN) ? _BSY : 1'b1;
 
