@@ -758,6 +758,7 @@ module profile (
     // delivers on real HARDWARE (the Verilator sim reads these via public_flat_rd;
     // the FPGA needs a probe). LPRO = dbg_block0_hdr (block bytes 0-7; FILEID is
     // bits [31:16] and must be 0xAAAA). LPR2 = status + max_state + live signals.
+`ifndef SIMULATION
     altsource_probe #(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
         .instance_id ("LPRO"), .probe_width (64), .source_width (1),
@@ -771,6 +772,7 @@ module profile (
     ) u_pro_st_probe ( .source(), .probe({ dbg_sd_fileid, dbg_sd_wr_cnt,
         rd_acks, dbg_rd_data_cnt, max_state, dbg_sd_lba_last[15:0], 3'd0 }),
         .source_clk(clk), .source_ena(1'b1) );
+`endif
 endmodule
 
 // Simple 1-write / 1-async-read LUT-RAM. The canonical pattern below maps to

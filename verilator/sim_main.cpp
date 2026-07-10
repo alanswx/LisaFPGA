@@ -63,6 +63,8 @@ struct SimOptions {
 	uint32_t stop_pc = 0xffffffff;
 	bool trace = false;
 	bool boot_profile = false;
+	bool skip_ram_test = false;
+	bool crash_trace = false;
 	bool dump_rom_state = false;
 	std::string profile_image = "profile.image";
 	std::string screenshot;
@@ -70,7 +72,7 @@ struct SimOptions {
 
 static void PrintUsage(const char* argv0) {
 	fprintf(stderr,
-		"Usage: %s [--profile <image>] [--headless] [--cycles <count>] [--screenshot <path>] [--boot-profile] [--trace] [--help]\n"
+		"Usage: %s [--profile <image>] [--headless] [--cycles <count>] [--screenshot <path>] [--boot-profile] [--skip-ram-test] [--crash-trace] [--trace] [--help]\n"
 		"\n"
 		"  --profile <image>  ProFile disk image to mount (default: profile.image)\n"
 		"                     Aliases: --profile-image, --proimage\n"
@@ -79,6 +81,8 @@ static void PrintUsage(const char* argv0) {
 		"  --screenshot <path>\n"
 		"                     Headless: save the final VGA frame as a binary PPM image\n"
 		"  --boot-profile     Headless: select ProFile at the Lisa STARTUP FROM menu\n"
+		"  --skip-ram-test    Simulator: skip the ROM's full RAM sweep after sizing\n"
+		"  --crash-trace      Headless: dump recent instructions on post-loader HALT/reset\n"
 		"  --trace            Enable 68k instruction trace output\n"
 		"  --dump-rom-state   Headless: print Lisa ROM scratch/error RAM at exit\n"
 		"  --status-interval <count>\n"
@@ -101,6 +105,10 @@ static bool ParseOptions(int argc, char** argv, SimOptions* options) {
 			options->headless = true;
 		} else if (arg == "--boot-profile") {
 			options->boot_profile = true;
+		} else if (arg == "--skip-ram-test") {
+			options->skip_ram_test = true;
+		} else if (arg == "--crash-trace") {
+			options->crash_trace = true;
 		} else if (arg == "--trace") {
 			options->trace = true;
 		} else if (arg == "--dump-rom-state") {
@@ -201,6 +209,9 @@ bool headless_mode = false;
 uint64_t headless_status_interval = 5000000;
 uint64_t headless_status_start = 0;
 bool headless_boot_profile = false;
+bool skip_ram_test = false;
+bool ram_test_patch_applied = false;
+bool crash_trace = false;
 bool headless_boot_profile_started = false;
 bool headless_startup_menu_request_started = false;
 size_t headless_startup_menu_request_step = 0;
@@ -942,9 +953,70 @@ static uint32_t GetCpuReg(int reg)
 	       VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__excUnit__DOT__regs68L[reg];
 }
 
+static uint32_t GetCpuA7()
+{
+	bool supervisor = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__pswS;
+	return GetCpuReg(supervisor ? 16 : 15);
+}
+
+static bool MaybePatchFullRamTest()
+{
+	if (!skip_ram_test || ram_test_patch_applied) {
+		return true;
+	}
+
+	// Wait until the ROM has verified its own checksum. The parity-test region
+	// immediately precedes MEMTST2, leaving ample time before the target fetch.
+	uint32_t pc = GetCpuPc();
+	if (pc < 0xFE0D5C || pc > 0xFE0DF2) {
+		return true;
+	}
+
+	constexpr unsigned patch_word = 0x0E02 / 2;
+	auto& high = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__high_ROM_H__DOT__ROM_array;
+	auto& low = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__low_ROM_H__DOT__ROM_array;
+	if (high[patch_word] != 0x32 || low[patch_word] != 0x7c ||
+	    high[patch_word + 1] != 0x1e || low[patch_word + 1] != 0x04) {
+		fprintf(stderr,
+			"skip-ram-test: unexpected H ROM bytes at FE0E02: %02x%02x %02x%02x\n",
+			high[patch_word], low[patch_word], high[patch_word + 1], low[patch_word + 1]);
+		return false;
+	}
+
+	// Replace `MOVEA #MEMSTRT,A1` with `BRA.W TSTDONE` (FE0E4E). This keeps
+	// sizing, low-memory validation, status initialization, and the normal
+	// post-test success path intact.
+	high[patch_word] = 0x60;
+	low[patch_word] = 0x00;
+	high[patch_word + 1] = 0x00;
+	low[patch_word + 1] = 0x48;
+	ram_test_patch_applied = true;
+	fprintf(stderr,
+		"skip-ram-test: patched FE0E02 to BRA.W FE0E4E at main_time=%llu pc=%06X\n",
+		(unsigned long long)main_time, pc);
+	return true;
+}
+
+static uint32_t SimRamIndex(uint32_t byte_addr)
+{
+	// The Lisa multiplexes A8:A1 onto the DRAM row and A16:A9 onto the
+	// column. SDRAM_Controller_Flat preserves that row/column ordering in
+	// its flat backing array rather than using a linear CPU word address.
+	return (((byte_addr >> 17) & 0x0f) << 16) |
+	       (((byte_addr >> 1) & 0xff) << 8) |
+	       ((byte_addr >> 9) & 0xff);
+}
+
+static uint32_t SimRamIndexToPhysicalByte(uint32_t index)
+{
+	return (((index >> 16) & 0x0f) << 17) |
+	       (((index >> 8) & 0xff) << 1) |
+	       ((index & 0xff) << 9);
+}
+
 static uint16_t ReadSimRamWord(uint32_t byte_addr)
 {
-	return VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__sim_ram[(byte_addr >> 1) & 0xfffff];
+	return VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__sim_ram[SimRamIndex(byte_addr)];
 }
 
 static uint8_t ReadSimRamByte(uint32_t byte_addr)
@@ -977,6 +1049,56 @@ static void DumpSimRamRange(const char* label, uint32_t start, uint32_t bytes)
 	fprintf(stderr, "\n");
 }
 
+static void DumpMmuSegment(uint8_t segment, unsigned context, uint32_t logical_address)
+{
+	auto& low = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__low_MMU_RAM__DOT__RAM_array;
+	auto& mid = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__mid_MMU_RAM__DOT__RAM_array;
+	auto& high = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__high_MMU_RAM__DOT__RAM_array;
+	unsigned ms1 = (context & 1) ? 0 : 1;
+	unsigned ms2 = (context & 2) ? 0 : 1;
+	unsigned base = ((segment & 0x07) << 7) |
+	                (((segment >> 4) & 1) << 6) |
+	                (((segment >> 5) & 1) << 5) |
+	                (((segment >> 6) & 1) << 4) |
+	                (ms2 << 3) | (((segment >> 3) & 1) << 2) | ms1;
+	auto read_reg = [&](unsigned b_l) {
+		unsigned index = base | (b_l << 1);
+		return (uint16_t)((high[index] << 8) | (mid[index] << 4) | low[index]);
+	};
+	uint16_t slr = read_reg(0);
+	uint16_t sor = read_reg(1);
+	uint32_t segment_base = (uint32_t)segment << 17;
+	uint32_t offset = logical_address - segment_base;
+	uint32_t physical = ((((uint32_t)sor + (offset >> 9)) & 0x0fff) << 9) |
+	                    (offset & 0x01ff);
+	fprintf(stderr,
+		"MMU segment=%02X context=%u SOR=%03X SLR=%03X logical=%06X physical=%06X\n",
+		segment, context, sor, slr, logical_address, physical);
+	DumpSimRamRange("MMU-mapped RAM", physical, 64);
+}
+
+static void FindSimRamPattern(const char* label, const uint16_t* pattern, size_t words)
+{
+	unsigned hits = 0;
+	fprintf(stderr, "%s:", label);
+	for (uint32_t address = 0; address + words * 2 <= 0x200000; address += 2) {
+		bool match = true;
+		for (size_t i = 0; i < words; i++) {
+			if (ReadSimRam16(address + i * 2) != pattern[i]) {
+				match = false;
+				break;
+			}
+		}
+		if (match) {
+			fprintf(stderr, " %06X", address);
+			hits++;
+			if (hits == 16) break;
+		}
+	}
+	if (!hits) fprintf(stderr, " not found");
+	fprintf(stderr, "\n");
+}
+
 static void DumpLisaRomState()
 {
 	uint32_t ldbase = ReadSimRam32(0x21c);
@@ -1000,11 +1122,14 @@ static void DumpLisaRomState()
 		ReadSimRam32(0x680));
 	fprintf(stderr,
 		"CPUREGS D0=%08x D1=%08x D2=%08x D3=%08x D4=%08x D5=%08x D6=%08x D7=%08x "
-		"A0=%08x A1=%08x A2=%08x A3=%08x A4=%08x A5=%08x A6=%08x A7=%08x\n",
+		"A0=%08x A1=%08x A2=%08x A3=%08x A4=%08x A5=%08x A6=%08x A7=%08x "
+		"USP=%08x SSP=%08x S=%d\n",
 		GetCpuReg(0), GetCpuReg(1), GetCpuReg(2), GetCpuReg(3),
 		GetCpuReg(4), GetCpuReg(5), GetCpuReg(6), GetCpuReg(7),
 		GetCpuReg(8), GetCpuReg(9), GetCpuReg(10), GetCpuReg(11),
-		GetCpuReg(12), GetCpuReg(13), GetCpuReg(14), GetCpuReg(15));
+		GetCpuReg(12), GetCpuReg(13), GetCpuReg(14), GetCpuA7(),
+		GetCpuReg(15), GetCpuReg(16),
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__pswS);
 	DumpSimRamRange("ROM exception area", 0x280, 0x20);
 	DumpSimRamRange("ROM boot data", 0x1b0, 0x30);
 	DumpSimRamRange("LDPROF scratch status", 0x800, 0x230);
@@ -1168,6 +1293,163 @@ static void PrintHeadlessStatus()
 		top->sd_ack);
 }
 
+struct CrashTraceEntry {
+	uint64_t time;
+	uint32_t pc;
+	uint32_t ua;
+	uint32_t d0;
+	uint32_t a7;
+	uint16_t opcode;
+	uint8_t signals; // reset_n, halted, berr_n, bust_n, addrerr
+};
+
+static bool ObserveCrashTrace()
+{
+	static constexpr size_t trace_size = 256;
+	static CrashTraceEntry entries[trace_size];
+	static size_t next = 0;
+	static size_t count = 0;
+	static uint32_t last_pc = 0xffffffff;
+	static bool initialized = false;
+	static bool loaded_code_seen = false;
+	static bool prev_reset_n = true;
+	static bool prev_halted = false;
+	static bool prev_addrerr = false;
+	static unsigned addrerr_count = 0;
+	static bool mmu_utility_installed = false;
+
+	if (!crash_trace) return false;
+
+	uint32_t pc = GetCpuPc();
+	bool reset_n = VERTOPINTERN->emu__DOT__core__DOT___RESET;
+	bool halted = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__oHalted;
+	bool berr_n = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___BERR;
+	bool bust_n = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___BUST;
+	bool addrerr = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__busAddrErr;
+
+	if (!initialized) {
+		prev_reset_n = reset_n;
+		prev_halted = halted;
+		prev_addrerr = addrerr;
+		initialized = true;
+	}
+
+	if (pc != last_pc) {
+		last_pc = pc;
+		entries[next] = {
+			main_time,
+			pc,
+			(uint32_t)VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__UA,
+			GetCpuReg(0),
+			GetCpuA7(),
+			(uint16_t)top->rootp->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__Ir,
+			(uint8_t)((reset_n ? 1 : 0) | (halted ? 2 : 0) | (berr_n ? 4 : 0) |
+			          (bust_n ? 8 : 0) | (addrerr ? 16 : 0))
+		};
+		next = (next + 1) % trace_size;
+		if (count < trace_size) count++;
+	}
+
+	// ROM is at FE0000-FFFFFF. Once the selected ProFile loader executes from
+	// RAM, arm the crash triggers and ignore all earlier diagnostic reset edges.
+	if (!loaded_code_seen && headless_boot_profile_started &&
+	    pc >= 0x000800 && pc < 0xFE0000) {
+		loaded_code_seen = true;
+		fprintf(stderr, "crash-trace: armed at main_time=%llu pc=%08X\n",
+			(unsigned long long)main_time, pc);
+	}
+
+	const char* reason = nullptr;
+	if (loaded_code_seen) {
+		uint16_t mmu_utility_opcode = ReadSimRam16(0x000800);
+		if (!mmu_utility_installed && mmu_utility_opcode == 0x2a38) {
+			mmu_utility_installed = true;
+			fprintf(stderr,
+				"crash-trace: MMU utility installed at physical 000800 at main_time=%llu pc=%08X\n",
+				(unsigned long long)main_time, pc);
+		} else if (mmu_utility_installed && mmu_utility_opcode != 0x2a38) {
+			reason = "MMU utility at physical 000800 was overwritten";
+		} else if (!mmu_utility_installed && ReadSimRam16(0x001600) == 0x2a38) {
+			reason = "MMU utility was copied to physical 001600 instead of 000800";
+		}
+		if (addrerr && !prev_addrerr) {
+			addrerr_count++;
+			if (addrerr_count <= 8) {
+				fprintf(stderr,
+					"crash-trace: address-error marker %u at main_time=%llu pc=%08X a7=%08X\n",
+					addrerr_count, (unsigned long long)main_time, pc, GetCpuA7());
+			} else if (addrerr_count == 9) {
+				fprintf(stderr, "crash-trace: suppressing further address-error markers\n");
+			}
+		}
+		if (!reason) {
+			if (pc >= 0x00A84000 && pc < 0x00A84200 &&
+			    ReadSimRam16(0x000800) != 0x2a38) {
+				reason = "entered MMU utility but its physical code page is invalid";
+			} else if ((pc & 0xff000000) != 0) reason = "PC escaped 24-bit address space";
+			else if (halted && !prev_halted) reason = "fx68k HALT/double fault";
+			else if (!reset_n && prev_reset_n) reason = "CPU-board reset";
+		}
+	}
+
+	prev_reset_n = reset_n;
+	prev_halted = halted;
+	prev_addrerr = addrerr;
+	if (!reason) return false;
+
+	fprintf(stderr, "\ncrash-trace: %s at main_time=%llu pc=%08X\n",
+		reason, (unsigned long long)main_time, pc);
+	fprintf(stderr, "crash-trace: last %zu distinct instruction PCs:\n", count);
+	for (size_t i = 0; i < count; i++) {
+		const CrashTraceEntry& entry = entries[(next + trace_size - count + i) % trace_size];
+		fprintf(stderr,
+			"  t=%llu pc=%08X op=%04X ua=%06X d0=%08X a7=%08X "
+			"R=%d H=%d B=%d T=%d A=%d  %s\n",
+			(unsigned long long)entry.time, entry.pc, entry.opcode, entry.ua,
+			entry.d0, entry.a7,
+			(entry.signals & 1) != 0, (entry.signals & 2) != 0,
+			(entry.signals & 4) != 0, (entry.signals & 8) != 0,
+			(entry.signals & 16) != 0,
+			disassemble_68k(entry.pc, entry.opcode));
+	}
+	PrintHeadlessStatus();
+	fprintf(stderr,
+		"RAMADDR cpu_A=%05X physical=%06X latched=%02X:%X adder=%03X TD=%03X "
+		"MALEn=%d buffered_RA=%02X row=%02X col=%02X sram_word=%05X decoded=%06X\n",
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__A,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__A << 1,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__latched_MMU_address__BRA__20__03a13__KET__,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__latched_MMU_address__BRA__12__03a9__KET__,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__MMU_adder_out,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__TD,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___MALE,
+		VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__buffered_RA,
+		VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__row_addr,
+		VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__col_addr,
+		VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__sram_word_addr,
+		SimRamIndexToPhysicalByte(VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__sram_word_addr));
+	uint32_t ram_word = VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__sram_word_addr;
+	auto& ram = VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__sim_ram;
+	fprintf(stderr, "crash-trace: last SRAM word=%05X (physical byte=%06X) q=%04X contents:",
+		ram_word, SimRamIndexToPhysicalByte(ram_word),
+		VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__sim_ram_q);
+	uint32_t first_word = ram_word >= 8 ? ram_word - 8 : 0;
+	for (uint32_t word = first_word; word < first_word + 24; word++) {
+		if (((word - first_word) % 8) == 0) fprintf(stderr, "\n  %05X:", word);
+		fprintf(stderr, " %04X", ram[word]);
+	}
+	fprintf(stderr, "\n");
+	DumpMmuSegment(0x54, 0, 0xA84000);
+	static const uint16_t mmu_utility_pattern[] = {0x2a38, 0x02a4, 0xe08d, 0xe28d};
+	static const uint16_t bad_fetch_pattern[] = {0x8500, 0x252a};
+	FindSimRamPattern("MMU utility signature in physical RAM", mmu_utility_pattern,
+		sizeof(mmu_utility_pattern) / sizeof(mmu_utility_pattern[0]));
+	FindSimRamPattern("bad trap-fetch signature in physical RAM", bad_fetch_pattern,
+		sizeof(bad_fetch_pattern) / sizeof(bad_fetch_pattern[0]));
+	DumpLisaRomState();
+	return true;
+}
+
 int verilate() {
 	if (!Verilated::gotFinish()) {
 		if (soft_reset) {
@@ -1207,6 +1489,12 @@ int verilate() {
 				bus.BeforeEval();
 			}
 			top->eval();
+			if (!MaybePatchFullRamTest()) {
+				headless_stop_requested = true;
+			}
+			if (ObserveCrashTrace()) {
+				headless_stop_requested = true;
+			}
 			if (headless_mode && headless_stop_pc != 0xffffffff &&
 			    main_time >= headless_stop_start && GetCpuPc() == headless_stop_pc) {
 				fprintf(stderr, "headless: stop-pc hit at main_time=%llu pc=%06X\n",
@@ -1364,6 +1652,8 @@ int main(int argc, char** argv, char** env) {
 	headless_stop_pc = options.stop_pc;
 	headless_stop_start = options.stop_start;
 	headless_boot_profile = options.boot_profile;
+	skip_ram_test = options.skip_ram_test;
+	crash_trace = options.crash_trace;
 	headless_screenshot_path = options.screenshot;
 	headless_dump_rom_state = options.dump_rom_state;
 	cpu_trace_enable = options.trace;

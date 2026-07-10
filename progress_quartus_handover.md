@@ -15,27 +15,31 @@ Target: Cyclone V, DE10-Nano `5CSEBA6U23I7`, Quartus 17.0.2.
 - **The MiSTer port now has an internal Verilog ProFile emulator**
   (`rtl/profile.sv`). It uses MiSTer/HPS block-device signals on hardware and
   `verilator/sim/sim_blkdevice.cpp` as the Verilator stand-in.
-- **Current active issue:** get Lisa Office System booting from a mounted ProFile
-  image through the internal emulator. The latest work fixed the Verilator mount
-  delay/`sd_ack` handoff, fixed a 32-bit simulator cycle-counter overflow that
-  blocked late ProFile reads, matched ESProFile's 10MB spare-table fields, and
-  matched ESProFile's read timing by preloading the first status byte before
-  releasing `_BSY`.
-- **Block-0 ProFile validation now passes in long Verilator traces.** Lisa ROM
-  error `84` is `BADHDR`, but current status output shows
-  `hdr0=00000022aaaa8200` for the LOS 3.0 image. The remaining failure occurs
-  later: loaded ProFile boot code executes around `0x207F34..0x207F38`, then the
-  system returns to ROM/monitor code.
+- **Current active issue:** finish Lisa Office System booting from a mounted
+  ProFile image through the internal emulator. The loader now runs past the
+  former debugger/reboot failure; the captured screen still shows the hourglass
+  at frame 626, so the next hardware test should confirm that it also remains
+  alive past the old frame-410 reset.
+- **The debugger/reboot root cause was an MMU address-latch race.** On `_MALE`'s
+  rising edge, `B_L` had already selected the SLR, so A12:A9 captured the SLR
+  adder result instead of the SOR result. The OS MMU utility was consequently
+  copied to physical `0x001600` while segment 84 mapped it at `0x000800`.
+  `rtl/CPU_board.sv` now captures A12:A9 while the SOR phase is active.
+- **The fixed Verilator build passes the former crash point.** The MMU utility
+  is installed at physical `0x000800`, and runs completed without reset, halt,
+  or invalid PC through 850,000,000 cycles/frame 626. At exit the CPU was still
+  executing OS code at `0x520850`, with ProFile activity advanced to block
+  `0x0C90`.
 
 ## Current Verification Loop
 
 ```bash
 cd verilator
 make
-./obj_dir/Vemu --headless --boot-profile \
+./obj_dir/Vemu --headless --boot-profile --skip-ram-test --crash-trace \
   --profile "Lisa Office System 3.0 and Workshop 3.0.image" \
-  --cycles 3800000000 \
-  --status-interval 500000000 \
+  --cycles 850000000 \
+  --status-interval 0 \
   --screenshot /tmp/lisa.ppm
 ```
 

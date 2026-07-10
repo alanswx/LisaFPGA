@@ -694,12 +694,16 @@ module CPU_board(
         end
     end*/
 
-    // Now do the LS374 that latches A9-A12 and the IOA signals
-    // Edge sensitive, not level sensitive
+    // Now do the LS374 that latches A9-A12 and the IOA signals. In the
+    // original hardware its clock edge arrives before B_L selects the SLR.
+    // Capture while the SOR phase is active so zero-delay RTL cannot sample
+    // the just-selected SLR adder result on the _MALE rising edge.
     logic [16:13] IOA_int;
-    always_ff @(posedge _MALE) begin
-        latched_MMU_address[12:9] <= MMU_adder_out[3:0];
-        IOA_int <= MMU_adder_out[7:4];
+    always_ff @(posedge clk_sys) begin
+        if (!_MALE) begin
+            latched_MMU_address[12:9] <= MMU_adder_out[3:0];
+            IOA_int <= MMU_adder_out[7:4];
+        end
     end
 
     // Finally, put the latched address (which can tri-state itself if the latches aren't enabled) on the address bus

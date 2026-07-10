@@ -49,7 +49,19 @@ diagnostics at exit.
 `--boot-profile` is a headless helper for ProFile boot testing. It asks the ROM
 for the `STARTUP FROM` menu during the ROM keyboard-scan window and then injects
 the ProFile boot key sequence. In the current 2MB RAM configuration, the ROM can
-still spend a long time in memory self-check before that scan point.
+still spend a long time in memory self-check before that scan point. Add
+`--skip-ram-test` to retain ROM memory sizing and the initial low-memory check
+while bypassing the subsequent full-memory sweep. The simulator applies this
+patch only after the ROM checksum has completed; it does not alter the ROM files
+or FPGA behavior.
+
+`--crash-trace` arms after execution transfers from ROM into the loaded ProFile
+boot code. It keeps the last 256 distinct instruction PCs and stops on an
+invalid 32-bit PC, HALT/double fault, or CPU-board reset. Address-error pulses
+are reported but are not terminal because the fx68k core also exposes transient
+pulses during valid byte cycles. The dump includes bus signals, registers,
+selected MMU state, and ROM/loader scratch RAM before restart diagnostics can
+clear them.
 
 ## ProFile Emulation
 
@@ -85,7 +97,7 @@ The simulator is configured for 2MB RAM (`RAM_SEL=2'b11`) so Lisa Office System
 has enough memory to load. Earlier 512KB runs reached Lisa OS error `10727`,
 which maps to loader memory exhaustion.
 
-Current ProFile boot debugging is focused on the transition after ROM self-check:
+The ProFile boot path now passes the transition after ROM self-check:
 
 - the image mount handshake now completes and clears `img_mounted`;
 - the simulator block backend now services `sd_rd`/`sd_wr` deterministically and
@@ -103,10 +115,16 @@ to inspect the 20-byte ProFile header, but the file ID at header offset 4 was no
 `00 00 00 22 aa aa 82 00`; the simulator status field `hdr0` captures what the
 emulated ProFile actually delivered. Current long-run traces show
 `hdr0=00000022aaaa8200`, so the earlier error-84 signature is fixed; the
-remaining failure occurs later, after loaded ProFile boot code begins executing.
-The LOS 3.0 image is already in physical ProFile interleave order; `LDPROF`'s
-9:1 software interleave maps logical boot blocks to valid checksummed physical
-blocks.
+LOS loader executes from RAM. A later debugger/reboot was caused by the MMU
+A12:A9 latch sampling the SLR adder result as `_MALE` rose, rather than retaining
+the preceding SOR result. That copied the OS MMU utility to physical `0x001600`
+while its segment mapped `0x000800`. The CPU-board latch now captures during the
+SOR phase. With that fix, the utility is installed at `0x000800` and the simulator
+runs without reset, halt, or invalid PC through 850,000,000 cycles/frame 626.
+The screen is still at the boot hourglass at that point, so full desktop startup
+is not yet proven. The LOS 3.0 image is already in physical ProFile interleave
+order; `LDPROF`'s 9:1 software interleave maps logical boot blocks to valid
+checksummed physical blocks.
 
 Long headless runs are expected. The ROM self-check can still be in progress at
 hundreds of frames.
