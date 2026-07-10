@@ -595,3 +595,75 @@ kc1=0xBF → RSTSCAN succeeds → no menu → the Lisa proceeds to boot the ProF
 the COP decodes 0x80/0xBF. Candidates: (a) adjust the adapter's bit period in
 usb_keyboard_interface.sv to match the COP's sampling, or (b) verify/adjust the
 COP copck enable rate. Verify each attempt via LCOP kc0 → 0x80.
+
+## Session update (2026-07-10): ProFile read corruption FIXED; COP misdecode re-diagnosed
+
+### 1. ProFile intermittent read corruption — FIXED (commit 8641607)
+The byte-by-byte ProFile parallel-port READ path intermittently delivered a bad
+byte → error 10726 ("cant read boot device") or a Line-1111/bus-error crash
+mid-read (as early as rd_acks≈15). **Root cause:** the Lisa→drive control signals
+`_PSTRB`, `_CMD`, `DR_W` were E-sampled before reaching the ProFile emulator
+(`rtl/IO_board.sv`), adding up to ~0.5µs latency. The emulator (clk_sys 81.5MHz)
+must put the next data byte on the bus within the host's strobe→next-read window;
+when that window occasionally dipped below the E-sampling latency, the Lisa
+latched a stale/mid-transition byte. **Fix:** feed the emulator the RAW
+(un-E-sampled) `_PSTRB_ungated`/`_CMD_ungated`/`PR_W_ungated`. The reverse-
+direction `_BSY`/parity into the Lisa's E-clocked VIA stay E-sampled (they need
+it). Matches the ESProFile author's note ("drive must respond to STRB fast —
+timings tight at 75MHz"). **Verified on hardware:** two fresh boots read 49 and
+151 ProFile sectors cleanly with NO fatal crash (was crashing mid-read before).
+Full end-to-end (desktop) proof is gated on the COP menu issue below.
+
+### 2. COP keyboard misdecode — RE-DIAGNOSED (supersedes the 2026-07-07 analysis)
+The 906e543 COP-clock fix (copck2x_en doubled to 7.8MHz → COP ck_en 3.9MHz ÷16 =
+4.1µs/instruction) **changed the picture**. LCOP kc0..kc3 now reads
+**0x85, 0x87, 0x80, 0xBF** — i.e. the correct **0x80 (RSTCODE) and 0xBF (kbd ID)
+DO now arrive** (kc2/kc3). So the old "0x80→0x85 / 0xBF→0x87 misdecode, 0x80 never
+arrives" hypothesis is WRONG now. New facts:
+- `dbg_kbdout_cnt=18` ⇒ the adapter transmitted exactly **2 bytes** (0x80, 0xBF)
+  on the serial line. But the COP delivered **4+** bytes to the CPU. So **0x85 and
+  0x87 are COP-*generated*, not serial-line misdecodes.**
+- Boot-ROM equates (Lisa_Boot_ROM_Asm_Listing): `RSTCODE=$80`, `MSPLG=$87`
+  (mouse plugged in), `MSUNPLG=$07`, `MOUSDWN=$86`, `KUNPLG=$FD`. The 0x81–0x89
+  range (incl. `$85`=CLRSTAT) are **disk-controller commands, NOT COPS codes** —
+  so **0x85 is a genuinely spurious COPS code** (and since keycodes use bit7=1 for
+  key-down, 0x85 ≡ "key $05 down"). `0x87` is legit (mouse-plugged).
+- **The COP+adapter timing both MATCH the original Vivado design** (COP: ck_en
+  3.9MHz ÷16; adapter: usbclk 12MHz, bit widths 188/369 cycles unchanged). So this
+  is NOT a gross clock regression.
+- RSTSCAN trace of 0x85,0x87,0x80,0xBF gives d4=1 (0x87 "mouse connect, ignore")
+  and d3=2 (0xBF stored as ID) → **should NOT set BTMENU** (menu needs d4≥2 via a
+  0x87+0x07 pair, or d3=0). So the real menu trigger is in the codes **after kc3**,
+  which kc0..kc3 didn't capture.
+- **Action:** LCOP extended to capture **8** codes (kc0..kc7); read raw LCOP hex
+  = kc0[63:56]…kc7[7:0].
+
+### 3. Menu trigger FOUND (2026-07-10, 8-code LCOP): COP reports keyboard-COPS-RAM error
+Full 8-code sequence on hardware: **0x85, 0x87, 0x80, 0xBF, 0x80, 0xEF, 0xFF, 0xFF**.
+The boot-ROM STARTUP-menu decision is `MOVE d7,d0; ANDI.L #$183000,d0; BNE $FE1246`.
+**$183000 = bits 12,13,19,20** (NOT 23/24 — earlier notes were wrong). In RSTSCAN's
+code-handler:
+- `CMPI #$FF (KCERR) → BSET #$D` (**bit 13**, IN mask) @0xFE0A3C
+- `CMPI #$FE (ICERR) → BSET #$C` (**bit 12**, IN mask) @0xFE0A46
+- d3==0 → BSET #$17 (bit 23, NOT in mask); d4≥2 → BSET #$18 (bit 24, NOT in mask)
+  ⇒ **the mouse-connect (0x87) and keyboard-ID (0xBF) state do NOT raise the menu.**
+
+So the trigger is **kc6 = 0xFF = KCERR (keyboard COPS RAM error)**: RSTSCAN reads it
+during the post-reset code scan → sets bit 13 → BTMENU → STARTUP-FROM menu →
+ProFile never booted. (kc0=0x85 "key $05 down" may also hit KEYSCAN, secondary.)
+
+**Refined root cause:** the COP (t420/COP421 firmware) is emitting a **keyboard-
+COPS-RAM error (0xFF)** at power-up. `dbg_kbdout_cnt=18` ⇒ the adapter sent only
+the 2-byte 0x80/0xBF serial reset; the 0x85/0xEF/0xFF codes are **COP-generated**.
+This points at the **keyboard↔COP self-test / RAM-verify handshake** not being
+satisfied by `usb_keyboard_interface.sv` (which emulates key *transport* but not
+the keyboard unit's power-up self-test that the I/O COP421 firmware expects). This
+is a deeper issue than raw bit-timing (COP+adapter timing both match the original
+Vivado design). NOT yet fixed — needs understanding the two-COP keyboard self-test
+handshake (I/O COP421 ↔ keyboard-unit COP), or a way to make the COP's keyboard-
+RAM test pass. **The 8-code LCOP probe is committed for this work.**
+
+**Verification for any COP fix:** LCOP should show **no 0xFF/0xFE** and kc0=0x80;
+then the Lisa skips the menu and boots the ProFile (LPRO/LPR2 rd_acks climb into
+the hundreds — which also gives the 8641607 ProFile-corruption fix its full
+end-to-end stress test).

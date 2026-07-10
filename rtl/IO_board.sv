@@ -1615,7 +1615,14 @@ module IO_board(
     logic [7:0] kc1 /*verilator public_flat_rd*/ = 0;
     logic [7:0] kc2 /*verilator public_flat_rd*/ = 0;
     logic [7:0] kc3 /*verilator public_flat_rd*/ = 0;
-    logic [2:0] kc_idx = 0;
+    // Extend to 8 codes so the FULL COPS reset sequence is visible (kc0..kc3
+    // showed 85,87,80,BF which per RSTSCAN shouldn't raise BTMENU -> the trigger
+    // is in the codes AFTER kc3; capture them to find it).
+    logic [7:0] kc4 /*verilator public_flat_rd*/ = 0;
+    logic [7:0] kc5 /*verilator public_flat_rd*/ = 0;
+    logic [7:0] kc6 /*verilator public_flat_rd*/ = 0;
+    logic [7:0] kc7 /*verilator public_flat_rd*/ = 0;
+    logic [3:0] kc_idx = 0;
     always_ff @(posedge clk_sys) begin
         if (dotck_en) begin
             dbg_so_d   <= DATA_QUEUED_COP;
@@ -1626,13 +1633,17 @@ module IO_board(
                 dbg_so_cnt <= dbg_so_cnt + 1'd1;
                 dbg_l_in_last <= L_COP_in;
                 case (kc_idx)
-                    3'd0: kc0 <= L_COP_in;
-                    3'd1: kc1 <= L_COP_in;
-                    3'd2: kc2 <= L_COP_in;
-                    3'd3: kc3 <= L_COP_in;
+                    4'd0: kc0 <= L_COP_in;
+                    4'd1: kc1 <= L_COP_in;
+                    4'd2: kc2 <= L_COP_in;
+                    4'd3: kc3 <= L_COP_in;
+                    4'd4: kc4 <= L_COP_in;
+                    4'd5: kc5 <= L_COP_in;
+                    4'd6: kc6 <= L_COP_in;
+                    4'd7: kc7 <= L_COP_in;
                     default: ;
                 endcase
-                if (kc_idx < 3'd4) kc_idx <= kc_idx + 1'd1;
+                if (kc_idx < 4'd8) kc_idx <= kc_idx + 1'd1;
             end
             if (READ_ACK_COP != dbg_ack_d) dbg_ack_cnt <= dbg_ack_cnt + 1'd1;
             if (KBD_out != dbg_kbdo_d) dbg_kbdout_cnt <= dbg_kbdout_cnt + 1'd1;
@@ -1646,11 +1657,9 @@ module IO_board(
         .instance_id ("LCOP"), .probe_width (64), .source_width (1),
         .source_initial_value ("0"), .enable_metastability ("NO")
     ) u_cop_probe ( .source(), .probe({
-        kc0, kc1, kc2, kc3,
-        dbg_so_cnt, dbg_l_in_last, // [23:16] = LIVE last COP->CPU keycode
-        DATA_QUEUED_COP, READ_ACK_COP, _READY_COP, ON,
-        KBD_mouse_mux_sel, KBD_reset_COP, KBD_in,
-        KBD_out, port_b_out_KBD_VIA[0], KBD_via_DDRB[0], 5'd0
+        // Full 8-code COPS reset/boot sequence (each byte the COP delivered to
+        // the CPU, in order). kc0 should ideally be 0x80 (RSTCODE).
+        kc0, kc1, kc2, kc3, kc4, kc5, kc6, kc7
     }), .source_clk(clk_sys), .source_ena(1'b1) );
     `endif
 
