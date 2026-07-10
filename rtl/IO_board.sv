@@ -1284,6 +1284,7 @@ module IO_board(
     logic [19:0] sim_cop_gap_cnt = 20'd0;
     logic [11:0] sim_cop_hold_cnt = 12'd0;
     logic [11:0] sim_cop_power_cnt = 12'd0;
+    logic [5:0] sim_cop_ready_cnt = 6'd0;
 
     always_ff @(posedge clk_sys) begin
         if (copck2x_en) begin
@@ -1314,8 +1315,19 @@ module IO_board(
                 sim_cop_response_armed <= 1'b0;
                 sim_cop_l_out_prev <= L_COP_out_int;
                 sim_cop_ack_prev <= sim_cop_ora_read_toggle;
+                sim_cop_ready_cnt <= 6'd31;
             end else if (sim_cop_started) begin
                 KBD_reset_COP <= 1'b1;
+
+                // CRDY is COP-driven. LOS waits for both edges before making
+                // VIA port A an output, so CRDY cannot depend on DDRA already
+                // being set to output as the old simulation shim required.
+                if (sim_cop_ready_cnt == 6'd0) begin
+                    sim_cop_ready_cnt <= 6'd31;
+                    _READY_COP <= ~_READY_COP;
+                end else begin
+                    sim_cop_ready_cnt <= sim_cop_ready_cnt - 1'b1;
+                end
 
                 if (L_COP_out_int != sim_cop_l_out_prev) begin
                     if (L_COP_out_int == 8'h02) begin
@@ -1326,7 +1338,6 @@ module IO_board(
 
                 if (KBD_via_DDRA == 8'hff && !sim_cop_cmd_active) begin
                     sim_cop_cmd_active <= 1'b1;
-                    _READY_COP <= 1'b1;
                     if ((sim_cop_cmd_pending || L_COP_out_int == 8'h02) &&
                         sim_cop_seq_kind == 2'd0 && !DATA_QUEUED_COP && sim_cop_gap_cnt == 20'd0) begin
                         sim_cop_seq_kind <= 2'd2;
@@ -1335,8 +1346,6 @@ module IO_board(
                         sim_cop_response_armed <= 1'b1;
                         sim_cop_cmd_pending <= 1'b0;
                     end
-                end else if (KBD_via_DDRA == 8'hff) begin
-                    _READY_COP <= 1'b1;
                 end else if (KBD_via_DDRA != 8'hff) begin
                     if (sim_cop_response_armed) begin
                         sim_cop_response_armed <= 1'b0;
@@ -1344,7 +1353,6 @@ module IO_board(
                         sim_cop_gap_cnt <= 20'd64;
                     end
                     sim_cop_cmd_active <= 1'b0;
-                    _READY_COP <= 1'b0;
                 end
 
                 if (kbd_reset_asserted) begin
@@ -1419,6 +1427,7 @@ module IO_board(
                 sim_cop_cmd_pending <= 1'b0;
                 sim_cop_response_armed <= 1'b0;
                 sim_cop_l_out_prev <= L_COP_out_int;
+                sim_cop_ready_cnt <= 6'd0;
             end
 
             if (!(sim_cop_started && (sim_cop_gap_cnt != 20'd0 || DATA_QUEUED_COP))) begin

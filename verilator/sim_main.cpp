@@ -959,6 +959,9 @@ static uint32_t GetCpuA7()
 	return GetCpuReg(supervisor ? 16 : 15);
 }
 
+static uint32_t SimRamIndex(uint32_t byte_addr);
+static uint32_t ReadSimRam32(uint32_t byte_addr);
+
 static bool MaybePatchFullRamTest()
 {
 	if (!skip_ram_test || ram_test_patch_applied) {
@@ -990,10 +993,25 @@ static bool MaybePatchFullRamTest()
 	low[patch_word] = 0x00;
 	high[patch_word + 1] = 0x00;
 	low[patch_word + 1] = 0x48;
+
+	// RAMTEST's final address-check pass leaves every tested longword at
+	// 0xffffffff. LOS uses that state at $10000 as its active-low debug-mode
+	// flag; skipping the writes without reproducing their final state boots
+	// straight into LisaBug. Preserve low ROM workspace and the video page.
+	uint32_t screen_base = ReadSimRam32(0x000110);
+	if (screen_base < 0x000800 || screen_base > 0x200000) {
+		fprintf(stderr, "skip-ram-test: invalid screen base %06x\n", screen_base);
+		return false;
+	}
+	auto& ram = VERTOPINTERN->emu__DOT__core__DOT__slot1__DOT__SDRAM_2MB__DOT__sim_ram;
+	for (uint32_t byte_addr = 0x000800; byte_addr < screen_base; byte_addr += 2) {
+		ram[SimRamIndex(byte_addr)] = 0xffff;
+	}
 	ram_test_patch_applied = true;
 	fprintf(stderr,
-		"skip-ram-test: patched FE0E02 to BRA.W FE0E4E at main_time=%llu pc=%06X\n",
-		(unsigned long long)main_time, pc);
+		"skip-ram-test: patched FE0E02 to BRA.W FE0E4E and initialized RAM "
+		"through %06x at main_time=%llu pc=%06X\n",
+		screen_base, (unsigned long long)main_time, pc);
 	return true;
 }
 
@@ -1218,10 +1236,11 @@ static void PrintHeadlessStatus()
 		"RESETn=%d BERRn=%d BUSTn=%d HDERn=%d SFERn=%d CDACKn=%d "
 		"RSTSWint=%d ONprev=%d "
 		"SPIO=%d IOCY=%d MMUIO=%d CPUC1=%d MCY=%d UA=%06X D7=%08x "
+		"POL{addr=%06x val=%04x cnt=%02x} "
 		"COP{so=%02x ack=%02x kbdin=%02x in=%02x out=%02x kc=%02x,%02x,%02x,%02x dq=%d ra=%d idx=%d} "
 		"KBD{prb=%02x ddrb=%02x pcr=%02x acr=%02x ifr=%02x ier=%02x irq=%d pres=%d} "
 		"PP{prb=%02x ddrb=%02x penfall=%04x cmduedge=%04x cmdinen=%x} "
-		"PRO{state=%02x max=%02x cmd=%02x strb=%02x rdack=%02x cinrst=%x rst=%d pres=%d blk=%06x c0=%02x stat0=%08x hdr0=%016llx} "
+		"PRO{state=%02x max=%02x cmd=%02x strb=%02x rdack=%02x cinrst=%x rst=%d pres=%d blk=%06x c0=%02x stat0=%08x hdr0=%016llx last=%016llx:%016llx} "
 		"sd_rd=%03x sd_wr=%03x lba0=%u mounted=%03x "
 		"BLK{cur=%d r=%d w=%d delay=%d byte=%d ack=%03x}\n",
 		(unsigned long long)main_time,
@@ -1244,6 +1263,9 @@ static void PrintHeadlessStatus()
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__MCY,
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__UA,
 		GetCpuD7(),
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__dbg_data_addr << 1,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__dbg_data_val,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__dbg_data_rd_cnt,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_so_cnt,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_ack_cnt,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_kbdin_cnt,
@@ -1281,6 +1303,8 @@ static void PrintHeadlessStatus()
 		VERTOPINTERN->emu__DOT__profile_i__DOT__commandBuffer[0],
 		VERTOPINTERN->emu__DOT__profile_i__DOT__dbg_block0_status,
 		(unsigned long long)VERTOPINTERN->emu__DOT__profile_i__DOT__dbg_block0_hdr,
+		(unsigned long long)VERTOPINTERN->emu__DOT__profile_i__DOT__dbg_last_read_hdr0,
+		(unsigned long long)VERTOPINTERN->emu__DOT__profile_i__DOT__dbg_last_read_hdr1,
 		top->sd_rd,
 		top->sd_wr,
 		top->sd_lba[0],
@@ -1315,6 +1339,7 @@ static bool ObserveCrashTrace()
 	static bool prev_reset_n = true;
 	static bool prev_halted = false;
 	static bool prev_addrerr = false;
+	static bool prev_hpir_n = true;
 	static unsigned addrerr_count = 0;
 	static bool mmu_utility_installed = false;
 
@@ -1326,11 +1351,13 @@ static bool ObserveCrashTrace()
 	bool berr_n = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___BERR;
 	bool bust_n = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___BUST;
 	bool addrerr = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__M68K__DOT__busAddrErr;
+	bool hpir_n = VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___HPIR;
 
 	if (!initialized) {
 		prev_reset_n = reset_n;
 		prev_halted = halted;
 		prev_addrerr = addrerr;
+		prev_hpir_n = hpir_n;
 		initialized = true;
 	}
 
@@ -1386,8 +1413,12 @@ static bool ObserveCrashTrace()
 			if (pc >= 0x00A84000 && pc < 0x00A84200 &&
 			    ReadSimRam16(0x000800) != 0x2a38) {
 				reason = "entered MMU utility but its physical code page is invalid";
-			} else if ((pc & 0xff000000) != 0) reason = "PC escaped 24-bit address space";
-			else if (halted && !prev_halted) reason = "fx68k HALT/double fault";
+			} else if (headless_stop_pc != 0xffffffff &&
+			           main_time >= headless_stop_start && pc == headless_stop_pc) {
+				reason = "requested PC trace stop";
+			} else if (!hpir_n && prev_hpir_n && mmu_utility_installed) {
+				reason = "level-7/high-priority interrupt asserted";
+			} else if (halted && !prev_halted) reason = "fx68k HALT/double fault";
 			else if (!reset_n && prev_reset_n) reason = "CPU-board reset";
 		}
 	}
@@ -1395,10 +1426,21 @@ static bool ObserveCrashTrace()
 	prev_reset_n = reset_n;
 	prev_halted = halted;
 	prev_addrerr = addrerr;
+	prev_hpir_n = hpir_n;
 	if (!reason) return false;
 
 	fprintf(stderr, "\ncrash-trace: %s at main_time=%llu pc=%08X\n",
 		reason, (unsigned long long)main_time, pc);
+	fprintf(stderr,
+		"crash-trace: HPIRn=%d NMIsync=%d HDERlat_sync=%d SFERlat_sync=%d "
+		"HDERlat=%d SFERlat=%d NMICOP=%d\n",
+		hpir_n,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___NMI_sync,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___HDER_latched_sync,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___SFER_latched_sync,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___HDER_latched,
+		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___SFER_latched,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT___NMI_COP);
 	fprintf(stderr, "crash-trace: last %zu distinct instruction PCs:\n", count);
 	for (size_t i = 0; i < count; i++) {
 		const CrashTraceEntry& entry = entries[(next + trace_size - count + i) % trace_size];
@@ -1440,6 +1482,11 @@ static bool ObserveCrashTrace()
 	}
 	fprintf(stderr, "\n");
 	DumpMmuSegment(0x54, 0, 0xA84000);
+	uint32_t frame_base = GetCpuReg(14) - 0x20;
+	uint8_t frame_segment = frame_base >> 17;
+	for (unsigned context = 0; context < 4; context++) {
+		DumpMmuSegment(frame_segment, context, frame_base);
+	}
 	static const uint16_t mmu_utility_pattern[] = {0x2a38, 0x02a4, 0xe08d, 0xe28d};
 	static const uint16_t bad_fetch_pattern[] = {0x8500, 0x252a};
 	FindSimRamPattern("MMU utility signature in physical RAM", mmu_utility_pattern,

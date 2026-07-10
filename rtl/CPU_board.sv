@@ -1454,9 +1454,9 @@ module CPU_board(
     // DEBUG (ISSP "LPOL"): capture the last DATA-read (operand) address + value +
     // count. A busy-wait loop polls a memory-mapped register via data reads; this
     // shows WHICH register it's spinning on (dbg_pc is the program-fetch PC).
-    logic [23:1] dbg_data_addr   = '0;
-    logic [15:0] dbg_data_val    = '0;
-    logic [7:0]  dbg_data_rd_cnt = '0;
+    logic [23:1] dbg_data_addr /*verilator public_flat_rd*/ = '0;
+    logic [15:0] dbg_data_val /*verilator public_flat_rd*/ = '0;
+    logic [7:0]  dbg_data_rd_cnt /*verilator public_flat_rd*/ = '0;
     logic [5:0]  dbg_berr_cnt = '0;
     logic        dbg_as_d = 1'b1, dbg_berr_d = 1'b1;
     logic        dbg_ipl7_seen = 0, dbg_hderint_seen = 0, dbg_hderin_seen = 0;

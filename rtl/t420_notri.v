@@ -6166,15 +6166,15 @@ module t400_clkgen_2
       n3258 <= n3257;
 endmodule
 
-module t400_por_4_3
+module t400_por_63_6
   (input  clk_i,
    output por_n_o);
-  reg [2:0] por_cnt_q;
+  reg [5:0] por_cnt_q;
   reg por_n_q;
   wire n3213;
-  wire [2:0] n3215;
-  wire [2:0] n3216;
-  reg [2:0] n3222;
+  wire [5:0] n3215;
+  wire [5:0] n3216;
+  reg [5:0] n3222;
   wire n3223;
   reg n3224;
   assign por_n_o = por_n_q; //(module output)
@@ -6182,23 +6182,23 @@ module t400_por_4_3
   always @*
     por_cnt_q = n3222; // (isignal)
   initial
-    por_cnt_q = 3'b100;
+    por_cnt_q = 6'b111111;
   /* rtl/t400_por.vhd:78:10  */
   always @*
     por_n_q = n3224; // (isignal)
   initial
     por_n_q = 1'b0;
   /* rtl/t400_por.vhd:93:20  */
-  assign n3213 = por_cnt_q == 3'b000;
+  assign n3213 = por_cnt_q == 6'b000000;
   /* rtl/t400_por.vhd:96:32  */
-  assign n3215 = por_cnt_q - 3'b001;
+  assign n3215 = por_cnt_q - 6'b000001;
   /* rtl/t400_por.vhd:93:7  */
   assign n3216 = n3213 ? por_cnt_q : n3215;
   /* rtl/t400_por.vhd:92:5  */
   always @(posedge clk_i)
     n3222 <= n3216;
   initial
-    n3222 = 3'b100;
+    n3222 = 6'b111111;
   /* rtl/t400_por.vhd:92:5  */
   assign n3223 = n3213 ? 1'b1 : por_n_q;
   /* rtl/t400_por.vhd:92:5  */
@@ -10773,8 +10773,7 @@ module t420_notri
     .d_i(dm_data_from_core_s),
     .d_o(dm_data_to_core_s));
   /* rtl/t420_notri.vhd:199:3  */
-  t400_por_4_3 por_b (
+  t400_por_63_6 por_b (
     .clk_i(ck_i),
     .por_n_o(por_n_s));
 endmodule
-

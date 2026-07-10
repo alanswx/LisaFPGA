@@ -132,6 +132,8 @@ module profile (
         ST_WRITE_FLUSH_C,
         ST_WRITE_DONE_0,
         ST_WRITE_DONE_1,
+        ST_WRITE_STATUS_0,
+        ST_WRITE_STATUS_1,
         ST_HPS_READ,
         ST_HPS_WRITE,
         ST_BAD_CMD
@@ -604,7 +606,13 @@ module profile (
                     if (_CMD == 1) begin
                         if (host_ack_seen || host_ack_value) begin
                             host_ack_seen <= 1'b0;
-                            state <= ST_IDLE;
+                            data_idx <= 0;
+                            pd_out <= 8'h00;
+                            // Release BSY only after CMD. LOS clears the VIA
+                            // interrupt after sending 0x55; releasing earlier
+                            // loses the edge and leaves S200 waiting forever.
+                            _BSY <= 1'b1;
+                            state <= ST_WRITE_STATUS_1;
                         end else begin
                             host_ack_seen <= 1'b0;
                             state <= ST_IDLE;
@@ -620,6 +628,27 @@ module profile (
                     end else if (_CMD == 1) begin
                         host_ack_seen <= 1'b0;
                         state <= ST_IDLE;
+                    end
+                end
+
+                // After acknowledging a write with 0x06, a ProFile waits for
+                // the Lisa's third 0x55 handshake and then returns four status
+                // bytes. LOS treats the 0x06 itself as a hard-error status if
+                // this phase is skipped.
+                ST_WRITE_STATUS_0: begin
+                    pd_out <= 8'h00;
+                    state <= ST_WRITE_STATUS_1;
+                end
+
+                ST_WRITE_STATUS_1: begin
+                    if (pstrb_falling) begin
+                        if (data_idx != 3) begin
+                            data_idx <= data_idx + 1'b1;
+                            state <= ST_WRITE_STATUS_0;
+                        end else begin
+                            pd_oe <= 1'b0;
+                            state <= ST_IDLE;
+                        end
                     end
                 end
 
@@ -706,6 +735,8 @@ module profile (
     reg [3:0] cmd_in_rst /*verilator public_flat_rd*/ = 0;
     reg [31:0] dbg_block0_status /*verilator public_flat_rd*/ = 0;
     reg [63:0] dbg_block0_hdr /*verilator public_flat_rd*/ = 0;
+    reg [63:0] dbg_last_read_hdr0 /*verilator public_flat_rd*/ = 0;
+    reg [63:0] dbg_last_read_hdr1 /*verilator public_flat_rd*/ = 0;
     // DEBUG: SD-side capture to see whether the HPS actually loads real data into
     // the cache on hardware (block-0 hdr came back all-zero on the FPGA).
     reg [15:0] dbg_sd_fileid = 0;    // sd_buff_dout when writing slot0 word 2 (FILEID)
@@ -733,6 +764,31 @@ module profile (
             {commandBuffer[1], commandBuffer[2], commandBuffer[3]} == 24'h000000) begin
             dbg_block0_status <= 32'h0;
             dbg_block0_hdr <= 64'h0;
+        end
+        if (state == ST_CMD_DECODE && commandBuffer[0] == 8'h00) begin
+            dbg_last_read_hdr0 <= 64'h0;
+            dbg_last_read_hdr1 <= 64'h0;
+        end
+        if (state == ST_READ_DATA_2 && pstrb_falling && !is_spare_read) begin
+            unique case (data_idx)
+                10'd4:  dbg_last_read_hdr0[63:56] <= pd_out;
+                10'd5:  dbg_last_read_hdr0[55:48] <= pd_out;
+                10'd6:  dbg_last_read_hdr0[47:40] <= pd_out;
+                10'd7:  dbg_last_read_hdr0[39:32] <= pd_out;
+                10'd8:  dbg_last_read_hdr0[31:24] <= pd_out;
+                10'd9:  dbg_last_read_hdr0[23:16] <= pd_out;
+                10'd10: dbg_last_read_hdr0[15:8]  <= pd_out;
+                10'd11: dbg_last_read_hdr0[7:0]   <= pd_out;
+                10'd12: dbg_last_read_hdr1[63:56] <= pd_out;
+                10'd13: dbg_last_read_hdr1[55:48] <= pd_out;
+                10'd14: dbg_last_read_hdr1[47:40] <= pd_out;
+                10'd15: dbg_last_read_hdr1[39:32] <= pd_out;
+                10'd16: dbg_last_read_hdr1[31:24] <= pd_out;
+                10'd17: dbg_last_read_hdr1[23:16] <= pd_out;
+                10'd18: dbg_last_read_hdr1[15:8]  <= pd_out;
+                10'd19: dbg_last_read_hdr1[7:0]   <= pd_out;
+                default: ;
+            endcase
         end
         if (state == ST_READ_DATA_2 && pstrb_falling && !is_spare_read && block_num == 24'h000000) begin
             unique case (data_idx)
