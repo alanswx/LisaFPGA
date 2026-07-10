@@ -1451,6 +1451,12 @@ module CPU_board(
     // _HDER_latched -> _HPIR -> IPL) with sticky "ever seen" flags, so one JTAG
     // read shows which stage of the parity-error path is broken.
     logic [23:1] dbg_pc = '0;
+    // DEBUG (ISSP "LPOL"): capture the last DATA-read (operand) address + value +
+    // count. A busy-wait loop polls a memory-mapped register via data reads; this
+    // shows WHICH register it's spinning on (dbg_pc is the program-fetch PC).
+    logic [23:1] dbg_data_addr   = '0;
+    logic [15:0] dbg_data_val    = '0;
+    logic [7:0]  dbg_data_rd_cnt = '0;
     logic [5:0]  dbg_berr_cnt = '0;
     logic        dbg_as_d = 1'b1, dbg_berr_d = 1'b1;
     logic        dbg_ipl7_seen = 0, dbg_hderint_seen = 0, dbg_hderin_seen = 0;
@@ -1466,6 +1472,12 @@ module CPU_board(
             dbg_as_d   <= _UAS;
             dbg_berr_d <= _BERR;
             if (dbg_as_d && !_UAS && FC[1] && !FC[0]) dbg_pc <= UA;
+            // data (operand) read cycle: FC=x01, R/W=read
+            if (dbg_as_d && !_UAS && !FC[1] && FC[0] && UREAD) begin
+                dbg_data_addr   <= UA;
+                dbg_data_rd_cnt <= dbg_data_rd_cnt + 1'd1;
+            end
+            if (!_UAS && !FC[1] && FC[0] && UREAD) dbg_data_val <= BD_in;
             if (dbg_berr_d && !_BERR && !(&dbg_berr_cnt)) dbg_berr_cnt <= dbg_berr_cnt + 1'd1;
             if (_IPL == 3'b000)   dbg_ipl7_seen    <= 1'b1;
             if (HDER_int)         dbg_hderint_seen <= 1'b1;
@@ -1521,6 +1533,18 @@ module CPU_board(
         dbg_vpawr_udhi, dbg_vpawr_ud_nz_seen,                                // [6:5]
         dbg_cdflop_vpa, dbg_cdcore_vpa, dbg_dtlat_vpa,                       // [4:2] rogue-ack detectors
         dbg_spio_vpa, dbg_earlyack_vpa                                       // [1:0]
+    }), .source_clk(clk_sys), .source_ena(1'b1) );
+    // LPOL: last data-read (operand) byte address + value + count, and the PC.
+    // For a busy-wait, dbg_data_addr is the polled register (logical address).
+    altsource_probe #(
+        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
+        .instance_id ("LPOL"), .probe_width (64), .source_width (1),
+        .source_initial_value ("0"), .enable_metastability ("NO")
+    ) u_pol_probe ( .source(), .probe({
+        dbg_data_addr, 1'b0,          // [63:40] byte address of last data read
+        dbg_data_val,                 // [39:24] value read
+        dbg_data_rd_cnt,              // [23:16] data-read count
+        16'd0                         // [15:0] pad
     }), .source_clk(clk_sys), .source_ena(1'b1) );
     `endif
 
