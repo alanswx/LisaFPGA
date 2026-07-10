@@ -198,8 +198,13 @@ begin
   -----------------------------------------------------------------------------
   por_b : entity work.t400_por
     generic map (
-      delay_g     => 4,
-      cnt_width_g => 3 -- Alex: Changed from 2 to 3 for LisaFPGA; I think 2 was a bug
+      -- POR counts raw ck_i cycles. Originally ck_i was COPCK_2x (7.8MHz), so
+      -- delay_g=4 held reset ~640ns (~2.5 COP instruction sub-cycles). After the
+      -- single-clock conversion ck_i = clk_sys (81.5MHz), which shrank the POR to
+      -- ~61ns -- released before ck_en (3.9MHz) even ticks. Scale the count up so
+      -- the POR again spans several ck_en periods (63 clk_sys cycles ~= 773ns).
+      delay_g     => 63,
+      cnt_width_g => 6 -- Alex: Changed from 2 to 3 for LisaFPGA; I think 2 was a bug
     )
     port map (
       clk_i   => ck_i,

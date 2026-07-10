@@ -667,3 +667,31 @@ RAM test pass. **The 8-code LCOP probe is committed for this work.**
 then the Lisa skips the menu and boots the ProFile (LPRO/LPR2 rd_acks climb into
 the hundreds — which also gives the 8641607 ProFile-corruption fix its full
 end-to-end stress test).
+
+### 4. COP model RULED OUT as the KCERR cause (2026-07-10, exhaustive audit)
+The keyboard misdecode was believed to be a COP serial-timing regression from the
+single-clock conversion. **It is NOT in the COP model.** Full audit of every
+clocked process in t400_core/clkgen/sio/io_g/io_in/io_l/io_d/alu/decoder/skip/
+stack/timer/dmem/pmem + t420_notri wrapper:
+- **Every** flop clocks on ck_i but gates on `ck_en_i` (or a derived single-tick
+  strobe icyc_en/in_en/out_en). The model is fully clock-enable gated and behaves
+  **bit-identically** whether ck_i is 7.8MHz (original) or 81.5MHz (now).
+- t400_clkgen counts `ck_en_i` pulses (not ck_i edges) for its ÷16; frequency-
+  independent. `ck_en_i = COPCK_clk_enable & copck2x_en` resolves to a correct
+  **3.90 MHz single-cycle strobe** — matching the original design's rate.
+- The **only** ungated ck_i register is `t400_por` (power-on-reset counter,
+  t400_por.vhd:90) — POR pulse shrank 640ns→61ns after the conversion. **Fixed**
+  (t420_notri.vhd generic delay_g 4→63, cnt_width_g 3→6, ~773ns) as a correctness
+  regression, **but hardware-tested and it did NOT change the COPS sequence** —
+  still 85,87,80,BF,80,EF,FF,FF. So the POR is not the KCERR cause either.
+
+**Therefore the KCERR (0xFF) regression is NOT inside the COP** — it is in the
+COP's reset-time ENVIRONMENT/INPUTS: the keyboard/mouse serial-line VALUE at the
+io_g pins during the COP's power-up self-test, the KBD_mouse mux/reset sequencing,
+or the reset-time handshake between usb_keyboard_interface.sv and the COP. (ck_en
+jitter is unlikely: it averages out over the 16 ck_en/instruction.) `dbg_kbdout_cnt=18`
+(adapter sent only the 2-byte 0x80/0xBF) rules the adapter's *transmit* out; the
+next probes should capture the **io_g keyboard/mouse line value + KBD_mouse_mux_sel
+timing during the COP's power-up window**, and the COP's keyboard-reset (SK) →
+adapter handshake, to see what the COP mis-samples that makes its firmware conclude
+"keyboard COPS RAM error".
