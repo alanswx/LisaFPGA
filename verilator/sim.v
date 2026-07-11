@@ -85,14 +85,17 @@ module emu (
 );
 
     // Power & Reset logic
-    reg [20:0] pwron_cnt = 21'd0;
+    // Wait until the real COP has completed POR before pressing the simulated
+    // power switch. The old 2^20-edge delay was consumed while COP firmware
+    // was still starting, so the edge shaper expired before the COP sampled G3.
+    reg [23:0] pwron_cnt = 24'd0;
     reg        pwrsw_n = 1'b1;
     always @(posedge clk_sys) begin
         if (reset) begin
-            pwron_cnt    <= 21'd0;
+            pwron_cnt    <= 24'd0;
             pwrsw_n      <= 1'b1;
         end else begin
-            if (!pwron_cnt[20]) pwron_cnt <= pwron_cnt + 21'd1;
+            if (!pwron_cnt[23]) pwron_cnt <= pwron_cnt + 24'd1;
             else                pwrsw_n   <= 1'b0;
         end
     end

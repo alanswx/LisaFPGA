@@ -418,11 +418,7 @@ module top(
     // And now generate a pulse whenever we see a falling edge on _PWRSW_sync
     logic _PWRSW_falling;
     logic [15:0] _PWRSW_pulse_counter; // We want the pulse to last a little more than just 1 clock, so make a counter to allow this
-    `ifdef SIMULATION
-        localparam [15:0] PWRSW_PULSE_MAX = 16'd1024;
-    `else
-        localparam [15:0] PWRSW_PULSE_MAX = 16'hFFFF;
-    `endif
+    localparam [15:0] PWRSW_PULSE_MAX = 16'hFFFF;
     always_ff @(posedge clk_sys) begin
         if (copck2x_en) begin
         if (_PWRSW_sync_prev && !_PWRSW_sync) begin

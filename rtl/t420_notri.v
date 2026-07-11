@@ -10454,6 +10454,10 @@ module t400_core_0_2_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0_0
   assign so_en_o = \sio_b.so_en_o ; //(module output)
   assign sk_o = \sio_b.sk_o ; //(module output)
   assign sk_en_o = \sio_b.sk_en_o ; //(module output)
+  /* rtl/t400_core.vhd:161:22 -- GHDL omitted the boolean conversion. */
+  assign ck_en_s = ck_en_i;
+  /* rtl/t400_core.vhd:164:3 -- to_X01 is identity for two-state simulation. */
+  assign io_g_s = io_g_i;
   /* rtl/t400_core.vhd:108:10  */
   assign por_s = n41; // (signal)
   /* rtl/t400_core.vhd:155:10  */
@@ -10705,9 +10709,9 @@ module t420_notri
    output so_en_o,
    output sk_o,
    output sk_en_o);
-  wire por_n_s;
-  wire [9:0] pm_addr_s;
-  wire [7:0] pm_data_s;
+  wire por_n_s /*verilator public_flat_rd*/;
+  wire [9:0] pm_addr_s /*verilator public_flat_rd*/;
+  wire [7:0] pm_data_s /*verilator public_flat_rd*/;
   wire [5:0] dm_addr_s;
   wire dm_we_s;
   wire [3:0] dm_data_to_core_s;

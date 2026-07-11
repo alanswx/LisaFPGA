@@ -1194,7 +1194,7 @@ module IO_board(
     // Now we need to make the COP, but first define some signals that connect to it
     // First up, the NMI that it can send to the CPU board
     // It's got to be a wire in order to keep the COP from getting mad during synthesis
-    logic _NMI_COP;
+    logic _NMI_COP /*verilator public_flat_rd*/;
     // NMI gets asserted when either the COP's NMI output is asserted, or the SCC's (_PSI) is
     assign _NMI = _NMI_COP & _PSI;
     // We have to mux NMI with the NMI from the interrupt switch in top.sv, so we need an OE signal for it too
@@ -1205,7 +1205,7 @@ module IO_board(
     logic _KBD_reset_VIA;
     // The power switch signal that goes to the COP
     // Same deal about being a wire
-    wire _PWRSW_COP; 
+    wire _PWRSW_COP /*verilator public_flat_rd*/;
     // And the signals used to communicate between the COP and the keyboard VIA
     // The L bus is a bidirectional 8 bit data bus used to send commands and data between the COP and the VIA
     logic [7:0] L_COP_out;
@@ -1257,17 +1257,30 @@ module IO_board(
     assign KBD_out = ((KBD_reset_COP & KBD_mouse_mux_sel[1]) || (!_KBD_reset_VIA & KBD_via_DDRB[0])) ? 1'b0 : 1'b1;
 
     logic dummy_COP0, dummy_COP1, dummy_COP2; // Dummy wires for unused COP outputs
+    logic [7:0] dummy_COP_L_en;
+    logic [3:0] dummy_COP_D_en /*verilator public_flat_rd*/;
+    logic [3:0] dummy_COP_G_en;
+    logic dummy_COP_SO_en, dummy_COP_SK_en;
 
     // One other thing we need to do: turn COPCK into a clock enable that goes high the cycle before the rising edge of COPCK_2x
-    logic COPCK_clk_enable;
+    logic COPCK_clk_enable /*verilator public_flat_rd*/;
+    logic COPCK_core_enable /*verilator public_flat_rd*/ = 1'b0;
+    logic COPCK_core_phase = 1'b0;
     always_ff @(posedge clk_sys) begin
+        // Register the qualified pulse for a full master-clock cycle. Passing
+        // the phase-accumulator carry directly into the converted VHDL core
+        // lets it disappear during the same settle cycle in Verilator, leaving
+        // the COP's internal divide counter permanently at its POR value.
+        COPCK_core_enable <= 1'b0;
         if (copck2x_en) begin
+            COPCK_core_phase <= ~COPCK_core_phase;
+            COPCK_core_enable <= ~COPCK_core_phase;
             // Luckily we can make this simply by just inverting COPCK
             COPCK_clk_enable <= ~COPCK;
         end
     end
 
-    `ifdef SIMULATION
+    `ifdef SIM_COP_STUB
     logic [5:0] sim_cop_byte_idx /*verilator public_flat_rd*/ = 6'd0;
     logic [1:0] sim_cop_seq_kind = 2'd0; // 1=keyboard reset, 2=clock response, 3=injected key
     logic [7:0] sim_cop_key_inject /*verilator public_flat_rw*/ = 8'h00;
@@ -1437,6 +1450,19 @@ module IO_board(
         end
     end
     `else
+    `ifdef SIMULATION
+    // Keep the headless simulator's COP observability/injection hooks present
+    // when the real COP is instantiated. The old behavioral COP is now opt-in;
+    // sim_cop_key_inject is consumed only by that stub until the headless path
+    // drives the real keyboard serial interface.
+    logic [5:0] sim_cop_byte_idx /*verilator public_flat_rd*/ = 6'd0;
+    logic [7:0] sim_cop_key_inject /*verilator public_flat_rw*/ = 8'h00;
+    logic sim_cop_ora_read_toggle = 1'b0;
+    `endif
+    `ifdef SIMULATION
+    // The generated Verilog has the VHDL generics baked in.
+    t420_notri cop421 (
+    `else
     t420_notri #(
         // 0 = divide by 4
         // 1 = divide by 8
@@ -1445,21 +1471,31 @@ module IO_board(
         .opt_ck_div_g(2), // Make sure it divides the clock by 16 (parameter=2) like the original, previously had it set to 1 (divide by 8)
         .opt_type_g(1)
     ) cop421 (
-        .ck_i(clk_sys), // Clock it from the 7.8MHz COPCK_2x clock net
-        .ck_en_i(COPCK_clk_enable & copck2x_en), // Use our 3.9MHz-derived clock enable as the clock enable input to the COP
+    `endif
+        .ck_i(clk_sys),
+        `ifdef SIMULATION
+        .ck_en_i(COPCK_core_enable), // Registered enable required by the converted Verilog model.
+        `else
+        .ck_en_i(COPCK_clk_enable & copck2x_en), // Preserve the validated FPGA COP clock phase.
+        `endif
         .reset_n_i(1'b1), // Other than power-on reset, which is handled internally, we never reset the COP because that would wipe the RTC
-        // .cko_i(), // We don't use the clock out pin for anything
+        .cko_i(1'b0), // Crystal clock mode does not use the external CKO input.
         .io_l_i(L_COP_out), // Hook up the bidirectional L bus
         .io_l_o(L_COP_in),
+        .io_l_en_o(dummy_COP_L_en),
         .io_d_o({_READY_COP, KBD_mouse_mux_sel, ON}), // The D output bus is 4 bits, which we use for READY, the 2-bit mux select, and the ON signal
+        .io_d_en_o(dummy_COP_D_en),
         .io_g_i({_PWRSW_COP, _NMI_COP, KBD_mouse_data_out[0], KBD_mouse_data_out[1]}), // The G bus is also 4 bits, and we use it to input PWRSW and the two keyboard/mouse data bits
         // The NMI input is unused (it's an output), but things break if we don't hook the corresponding NMI output to the input port
         // I learned this the hard way and spent far more time than I care to admit trying to figure out why the COP wasn't working
         .io_g_o({dummy_COP0, _NMI_COP, dummy_COP1, dummy_COP2}), // The only G output is for NMI, tie the others to dummy wires
+        .io_g_en_o(dummy_COP_G_en),
         .io_in_i(4'b1111), // The I inputs don't even exist on the COP421, so just tie them to 1
         .si_i(READ_ACK_COP_sync), // SI is an input to the COP from CA2 on the VIA; used to tell the cop when we've read a byte off its bus; use the version that's synced to the COPCK domain
         .so_o(DATA_QUEUED_COP), // And the SO output goes to CA1 on the VIA, which is asserted whenever the COP has data ready for the VIA
-        .sk_o(KBD_reset_COP) // SK is the keyboard reset output from the COP      
+        .so_en_o(dummy_COP_SO_en),
+        .sk_o(KBD_reset_COP), // SK is the keyboard reset output from the COP
+        .sk_en_o(dummy_COP_SK_en)
     );
     `endif
 

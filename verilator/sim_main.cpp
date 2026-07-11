@@ -1237,7 +1237,8 @@ static void PrintHeadlessStatus()
 		"RSTSWint=%d ONprev=%d "
 		"SPIO=%d IOCY=%d MMUIO=%d CPUC1=%d MCY=%d UA=%06X D7=%08x "
 		"POL{addr=%06x val=%04x cnt=%02x} "
-		"COP{so=%02x ack=%02x kbdin=%02x in=%02x out=%02x kc=%02x,%02x,%02x,%02x dq=%d ra=%d idx=%d} "
+		"COP{so=%02x ack=%02x kbdin=%02x in=%02x out=%02x kc=%02x,%02x,%02x,%02x dq=%d ra=%d idx=%d "
+		"por=%d pc=%03x op=%02x ce=%d pwr=%d den=%x div=%02x icyc=%d res=%d} "
 		"KBD{prb=%02x ddrb=%02x pcr=%02x acr=%02x ifr=%02x ier=%02x irq=%d pres=%d} "
 		"PP{prb=%02x ddrb=%02x penfall=%04x cmduedge=%04x cmdinen=%x} "
 		"PRO{state=%02x max=%02x cmd=%02x strb=%02x rdack=%02x cinrst=%x rst=%d pres=%d blk=%06x c0=%02x stat0=%08x hdr0=%016llx last=%016llx:%016llx} "
@@ -1278,6 +1279,16 @@ static void PrintHeadlessStatus()
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__DATA_QUEUED_COP,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__READ_ACK_COP,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__sim_cop_byte_idx,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__cop421__DOT__por_n_s,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__cop421__DOT__pm_addr_s,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__cop421__DOT__pm_data_s,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__COPCK_core_enable,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT___PWRSW_COP,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dummy_COP_D_en,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__cop421__DOT__core_b__DOT__clkgen_b__DOT__n3256,
+		(VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__COPCK_core_enable &&
+		 VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__cop421__DOT__core_b__DOT__clkgen_b__DOT__n3256 == 0),
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__cop421__DOT__core_b__DOT__reset_b__DOT__n3302,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__prb,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__ddrb,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__pcr,
