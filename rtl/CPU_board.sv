@@ -684,24 +684,24 @@ module CPU_board(
     // There are also latched "I/O address" signals that are clones of the standard A13-16 but are latched under different conditions
     logic [16:13] IOA;
 
-    // First, do the LS373 that latches A13-A20
-    // Level sensitive, not edge sensitive
-    assign latched_MMU_address[20:13] = !_MALE ? MMU_adder_out[11:4] : latched_MMU_address[20:13];
-    /*always_ff @(negedge _MALE) begin
-        // We latch on an asserted _MALE (mem addr latch enable), retain current output state otherwise
-        if (!_MALE) begin
-            latched_MMU_address[20:13] <= MMU_adder_out[11:4];
-        end
-    end*/
-
-    // Now do the LS374 that latches A9-A12 and the IOA signals. In the
-    // original hardware its clock edge arrives before B_L selects the SLR.
-    // Capture while the SOR phase is active so zero-delay RTL cannot sample
-    // the just-selected SLR adder result on the _MALE rising edge.
+    // Now do BOTH the LS373 (A13-A20) and the LS374 (A9-A12 + IOA). In the
+    // original hardware their latch edge arrives before B_L selects the SLR.
+    // Capture while the SOR phase is active so zero-delay RTL / a Quartus-
+    // inferred level-sensitive latch cannot sample the just-selected SLR adder
+    // result on the _MALE rising edge.
+    //
+    // FIX: [20:13] was previously a LEVEL-SENSITIVE combinational latch
+    // (`!_MALE ? MMU_adder_out[11:4] : hold`). The ed1ad06 MMU fix was only
+    // applied to [12:9]; the high bits kept the old latch and could still latch
+    // the SLR (garbage control-bit) adder output as the high physical-address
+    // bits -> high illegal addresses (0xCC.., 0xFA..) and a bus-error crash
+    // during OS load on hardware (Verilator's zero-delay sim happened to dodge
+    // it). Capture [20:13] the same edge-triggered SOR-phase way as [12:9].
     logic [16:13] IOA_int;
     always_ff @(posedge clk_sys) begin
         if (!_MALE) begin
-            latched_MMU_address[12:9] <= MMU_adder_out[3:0];
+            latched_MMU_address[20:13] <= MMU_adder_out[11:4];
+            latched_MMU_address[12:9]  <= MMU_adder_out[3:0];
             IOA_int <= MMU_adder_out[7:4];
         end
     end
