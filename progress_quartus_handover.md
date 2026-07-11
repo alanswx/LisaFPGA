@@ -778,3 +778,61 @@ faithfully delivers the boot codes, it can reproduce and debug the FPGA's kc0=0x
 KCERR in the fast loop. All SIM_REAL_COP changes are behind the define / sim-only;
 the FPGA build is unaffected. Debug taps (dbg_copck2x_cnt etc. + RCOP print) are
 temporary — strip before committing.
+
+## Session update (2026-07-11 cont.): single-source COP, MMU crash, KCERR narrowed
+
+Major progress (all pushed to origin/mister):
+- **478fddd — single-source Verilog COP.** The FPGA now compiles the GHDL-generated
+  `rtl/t420_notri.v` (with the ck_en_s/io_g_s driver fixes) instead of the ~24 VHDL
+  COP files, so FPGA + Verilator sim share ONE COP model. Verified on HW: FPGA-with-
+  Verilog-COP delivers the same COPS codes (85,87,80,BF, so_cnt=133) and boots
+  identically to the VHDL. `files.qip` comments out the COP VHDL, adds the .v;
+  IO_board instantiates t420_notri WITHOUT params (the .v bakes generics in).
+- **2781c3a — illegal-address crash FIXED.** The ed1ad06 MMU SOR-phase latch fix was
+  only applied to latched_MMU_address[12:9]; the HIGH bits [20:13] kept the old
+  level-sensitive latch and could latch the SLR (garbage) adder output -> high
+  illegal addresses (0xCC../0xFA.. = 0xFCxxxx I/O addrs with corrupted top bits) ->
+  bus-error storm during OS load (FPGA-only; Verilator dodged it). Fixed by capturing
+  [20:13] the same edge-triggered SOR-phase way as [12:9] (CPU_board.sv). On HW:
+  berr stable at 4, LPOL addr clean 0xFCDD9A, boot reaches the STARTUP menu.
+
+**Reframe:** with the MMU crash fixed, the boot cleanly reaches the STARTUP menu and
+WAITS there (the earlier "auto-proceed into OS at 0x52xxxx" was garbage execution
+from the MMU corruption). So the STARTUP menu (COP KCERR) is the genuine last boot
+blocker, and the keyboard is non-functional (injected keys reach the adapter but the
+COP doesn't forward them). Ruled OUT for the KCERR: serial bit-timing (COP receives
+0x80/0xBF correctly), the keyboard adapter (matches upstream/main; the RebeccaRGB
+change is keymap-only), VHDL-vs-Verilog, MMU, COP RAM inference, the COP<->VIA
+handshake (it delivers 133 bytes fine). => The KCERR is the COP421 firmware's
+keyboard SELF-TEST emitting 0xFF, a single-clock-conversion regression.
+
+**Tool status / sim SO artifact:** the sim can't yet reproduce the KCERR because the
+sim's real COP never asserts SO/SK (delivers 0 bytes vs the FPGA's 133) — a Verilator
+issue. Localized precisely: converted the COP SIO to clean SystemVerilog
+(`rtl/t400_sio.sv`, faithful translation of t400_sio.vhd, module named t400_sio_0_0
+to replace the one removed from t420_notri.v) — the SIO itself is CORRECT (phi1
+toggles, sk toggles), but SK/SO stay dead because **en0/en3 (the COP core EN register)
+are stuck at 0** in the sim (never written), while on the FPGA en3 IS set (SO works).
+So the sim SO fix needs the clean-SV COP conversion to CONTINUE from the SIO to the
+core's EN-register logic (t400_io_l / t400_core). The SIO SV is uncommitted (builds
+in sim; NOT yet FPGA-validated — it's on the COP critical path, so validate before
+committing). `DATA_QUEUED_COP` was marked public_flat_rd in IO_board.sv (Verilator
+inlined it once the SIO changed).
+
+**Next:** continue the clean-SV COP conversion to the EN-register module so the sim's
+real COP delivers codes (reproduces the KCERR) -> then debug the KCERR fast in sim.
+Or attack the KCERR self-test directly on FPGA. The clean-SV COP conversion also
+serves the single-source-maintainability goal (retire the GHDL .v eventually).
+
+### Update: SV SIO FPGA-validated — boot now reaches the HOURGLASS
+The clean-SV COP SIO (rtl/t400_sio.sv) was FPGA-validated: COP codes identical to
+the .v (LCOP 85,87,80,BF, so_cnt=133) AND the boot now gets PAST the STARTUP menu
+into the OS load — the screen shows the boot HOURGLASS (furthest ever; the .v-SIO
+build had stayed at the menu). So the SV SIO is a net improvement, committed.
+CORRECTION to the earlier same-session note: the 0x52xxxx execution with garbage-
+looking addresses is NOT a crash — those are the OS's high LOGICAL addresses (the
+Lisa physical space is only 21 bits; 0xFC.. I/O is a logical addr routed via the
+_IO segment bit, not high phys bits). rd_acks is frozen and the PC loops, so the
+new blocker is an OS-LOAD HANG at the hourglass (waiting on something — likely a
+ProFile/disk read that doesn't complete), NOT the illegal-address crash and NOT an
+MMU high-bit issue. Next: trace what the OS is waiting on at the hourglass.

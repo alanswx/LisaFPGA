@@ -1215,7 +1215,7 @@ module IO_board(
     // This is the SI (shift in) pin on the COP. It's used to acknowledge to the COP that we've read a byte off its L bus
     logic READ_ACK_COP;
     // This is the SO (shift out) pin on the COP, which hooks to VIA pin CA1. It gets asserted whenever the COP has data ready for the VIA
-    logic DATA_QUEUED_COP;
+    logic DATA_QUEUED_COP /*verilator public_flat_rd*/;
     
     // Go ahead and make synchronizers that sync _READY and DATA_QUEUED to the DOTCK domain so we can feed them into a VIA
     // No need to sync the whole data bus because a flip-flop synchronizer can't work over multiple bits at once due to inter-bit skew

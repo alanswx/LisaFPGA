@@ -71,4 +71,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/z8530_scc.sv
 # set_global_assignment -name VHDL_FILE rtl/t420_rom.vhd
 # set_global_assignment -name VHDL_FILE rtl/tb_pack-p.vhd
 set_global_assignment -name VERILOG_FILE rtl/t420_notri.v
+# Clean-SV reimplementation of the COP SIO (module t400_sio_0_0), extracted from
+# t420_notri.v. Fixes a Verilator eval hazard; must compile alongside the .v.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/t400_sio.sv
 set_global_assignment -name SYSTEMVERILOG_FILE Lisa.sv

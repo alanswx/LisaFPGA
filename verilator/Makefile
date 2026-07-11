@@ -92,6 +92,7 @@ V_SRC = \
 	$(RTL)/via6522.v \
 	$(RTL)/z8530_scc.sv \
 	$(RTL)/t420_notri.v \
+	$(RTL)/t400_sio.sv \
 	$(RTL)/top.sv
 
 
