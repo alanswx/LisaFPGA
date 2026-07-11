@@ -109,7 +109,18 @@ module emu (
     assign DDRAM_WE = 1'b0;
     assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
-    assign LED_DISK  = 0;
+    // Disk-activity LED wired to the ProFile: light on any parallel-port access
+    // (Lisa asserting _CMD, or the ProFile asserting _BSY). Pulse-stretched
+    // (~2^24/81.5MHz ~= 0.2s) so brief accesses are visible as blinks. Lets you
+    // see ProFile disk status on the MiSTer disk LED (was tied to 0). _CMD/_BSY
+    // are wires declared with the profile instance further down (module scope).
+    reg  [24:0] disk_led_cnt = 0;
+    wire        profile_active = ~_CMD_esprofile | ~_BSY_esprofile;
+    always @(posedge clk_sys) begin
+        if (profile_active)            disk_led_cnt <= {25{1'b1}};
+        else if (disk_led_cnt != 0)    disk_led_cnt <= disk_led_cnt - 1'b1;
+    end
+    assign LED_DISK  = |disk_led_cnt;
     assign LED_POWER = 0;
     assign BUTTONS   = 0;
     assign VGA_SCALER= 0;
