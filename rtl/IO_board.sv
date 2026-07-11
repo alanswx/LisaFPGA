@@ -1459,19 +1459,10 @@ module IO_board(
     logic [7:0] sim_cop_key_inject /*verilator public_flat_rw*/ = 8'h00;
     logic sim_cop_ora_read_toggle = 1'b0;
     `endif
-    `ifdef SIMULATION
-    // The generated Verilog has the VHDL generics baked in.
+    // Both the FPGA and the Verilator sim now use the GHDL-generated Verilog COP
+    // (rtl/t420_notri.v), which has the VHDL generics (opt_ck_div=16, opt_type=1)
+    // baked in at generation time — instantiate WITHOUT parameters.
     t420_notri cop421 (
-    `else
-    t420_notri #(
-        // 0 = divide by 4
-        // 1 = divide by 8
-        // 2 = divide by 16
-        // 3 = divide by 32
-        .opt_ck_div_g(2), // Make sure it divides the clock by 16 (parameter=2) like the original, previously had it set to 1 (divide by 8)
-        .opt_type_g(1)
-    ) cop421 (
-    `endif
         .ck_i(clk_sys),
         `ifdef SIMULATION
         .ck_en_i(COPCK_core_enable), // Registered enable required by the converted Verilog model.

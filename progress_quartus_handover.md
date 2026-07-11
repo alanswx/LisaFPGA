@@ -695,3 +695,86 @@ next probes should capture the **io_g keyboard/mouse line value + KBD_mouse_mux_
 timing during the COP's power-up window**, and the COP's keyboard-reset (SK) →
 adapter handshake, to see what the COP mis-samples that makes its firmware conclude
 "keyboard COPS RAM error".
+
+### 5. KCERR root cause FOUND via original-Vivado diff (2026-07-10): COP RAM inference
+The user dropped the original working Vivado tree into `references/LisaFPGA/`.
+Exhaustive diff of the keyboard/mouse/COP datapath (top.sv, IO_board.sv, all
+t400_*/t420_* COP files, usb_keyboard/mouse_interface) vs current: **the logic is
+byte-for-byte identical** (only diffs are clock→enable conversions, commented-out
+sim taps `tb_pc_s`/`tb_sa_s`, debug probes, and the ProFile raw-signal change).
+The COP firmware (t420_rom.vhd), core, RAM model (generic_ram_ena.vhd), and dmem
+ctrl are IDENTICAL. Keyboard bytes 0x80/0xBF **decode correctly** in the COP
+output, and muting the adapter still shows the menu — so it is NOT a serial-link
+or keyboard-line issue; the COP fails an INTERNAL power-up self-test.
+
+**Root cause = a Quartus-vs-Vivado RAM synthesis difference.** The COP data RAM
+(`generic_ram_ena`, 64x4) is `d_o <= mem_q(a_i)` with the write to the SAME a_i in
+one clocked process → RTL/Vivado semantics are **read-OLD-data**. The Quartus map
+report (Lisa.map.rpt line ~999) shows Quartus inferred it as an **ALTSYNCRAM
+"Simple Dual Port"** block RAM with **read-during-write mode "None"** — which can
+return NEW/undefined data on a same-address read-during-write. That mismatch fails
+the COP firmware's power-up RAM check → it emits **KCERR (0xFF)** → RSTSCAN sets
+d7 bit 13 → BTMENU. **Candidate fix:** `attribute ramstyle of mem_q : signal is
+"logic";` in generic_ram_ena.vhd forces logic/register implementation with
+deterministic read-old-data (matching Vivado). Verified uninferred from block RAM
+("RAM logic ... is uninferred due to 'logic' ramstyle", Info 276006).
+
+**Hardware result (ramstyle alone, on b2dbf11):** LCOP STILL showed 85,87,80,BF,
+80,EF,FF,FF (the KCERR codes did NOT disappear) — so the "RAM inference causes the
+COP self-test to emit KCERR" theory is NOT confirmed as stated. BUT the CPU got
+**past the STARTUP menu into OS code** (PC 0x52xxxx, rd_acks=75) for the first
+time, then stuck in an OS loop. So ramstyle changed behavior for the better even
+though it didn't clear the LCOP codes (mechanism still not fully understood —
+possibly the codes are stale-latched, or the RAM change shifted COP timing enough
+that RSTSCAN consumes them differently).
+
+### 6. sim vs FPGA divergence + combined fix (2026-07-10)
+User confirmed: with `ad80279` ("Fix LOS boot through ProFile write completion")
+the **simulator boots LOS**, but the **FPGA does not**. Root of the divergence:
+the sim uses the `` `ifdef SIMULATION `` **fake COP shim** (hardcodes 0x80/0xBF,
+no self-test) so it never hits KCERR/menu; the FPGA uses the real t420 COP and
+IS blocked at the menu. So the two known blockers are SEQUENTIAL and each tool
+only sees one:
+  1. **COP KCERR → STARTUP menu** (FPGA-only; ramstyle got past it in the b2dbf11
+     test). Sim can't reproduce (fake COP).
+  2. **Incomplete ProFile WRITE handshake → LOS spins in OS loop** (ad80279's
+     ST_WRITE_STATUS_0/1 fix). This is the OS loop the ramstyle test got stuck in.
+**Combined build under test: `ad80279` + ramstyle** — hypothesis is ramstyle
+clears blocker 1 and ad80279 clears blocker 2, so together the FPGA boots LOS.
+Verify: FPGA PC leaves the menu loop AND doesn't stall in the OS write-wait loop.
+
+### 7. BREAKTHROUGH (2026-07-11): generated COP Verilog `t420_notri.v` was missing the ck_en_s driver
+Per the user's steer, brought up the Verilator sim to use as a fast debug loop
+for the COP. Got it building (4 sim-only fixes: ps2_kbd unpacked-array init,
+"Verilator"-prefixed comments read as magic directives, defc.h→missing iwm.h
+replaced by `typedef uint32_t word32`, and 3 stale public-signal taps broken by
+the MMU-fix RTL). The sim BOOTS with the fake COP (reads ProFile, runs OS code)
+and shows kc0=0x80 — confirming the difference from the FPGA is the fake vs real
+COP (`ifdef SIMULATION` swaps a behavioral shim for the real t420).
+
+Wired the REAL COP into the sim via a new `SIM_REAL_COP` define (off by default;
+IO_board.sv `ifdef SIM_REAL_COP` instantiates t420_notri.v with the .v's port
+list — no params, resolve the bidirectional L bus `L_COP_in=(l_o&l_en)|~l_en`).
+Also fixed a real sim bug: sim.v pressed the power button at 2^20 (~12ms) vs the
+FPGA's 2^25 (~0.41s) — too early for a real COP (fake shim forced ON regardless).
+
+**Root cause the real COP never ran in sim (and why the fake shim exists):** the
+VHDL→Verilog translation DROPPED a driver. `rtl/t400_core.vhd:161` has
+`ck_en_s <= ck_en_i = '1';` — ck_en_s is the core-wide clock enable fanned out to
+all 13 sub-modules' ck_en_i. In `rtl/t420_notri.v`, `wire ck_en_s;` was declared
+but never assigned → it floated to 0 → the ENTIRE COP core was frozen (never
+executed) under Verilator. Proved via probes: POR releases (por_s 1→0), copck2x_en
+pulses, my ck_en_i to the COP pulses (cken_i=119636), but the core's ck_en_s
+accumulator stayed 0 and b_s never changed. **Fix:** add `assign ck_en_s = ck_en_i;`
+in t420_notri.v after the wire decl (sim-only; the FPGA uses the correct .vhd).
+After the fix the COP EXECUTES: b_s churns, ON asserts, CPU runs the boot ROM.
+
+**Still open (next):** with the real COP running, the COP↔CPU handshake isn't yet
+delivering codes (so=00, kc=00) — the CPU reaches the boot-ROM screen-draw loop
+(pc~0xFE314x) without RSTSCAN receiving COP codes. Need to debug the SO(DATA_QUEUED)
+/ SI(READ_ACK) / L-bus handshake between the real COP and VIA1 in sim (candidates:
+the L-bus resolution, SO/SK enable handling, or E-sampling/sync). Once the sim
+faithfully delivers the boot codes, it can reproduce and debug the FPGA's kc0=0x85
+KCERR in the fast loop. All SIM_REAL_COP changes are behind the define / sim-only;
+the FPGA build is unaffected. Debug taps (dbg_copck2x_cnt etc. + RCOP print) are
+temporary — strip before committing.

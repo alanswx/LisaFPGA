@@ -39,29 +39,36 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/usb_mouse_interface.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/uaddrPla.sv
 set_global_assignment -name VERILOG_FILE rtl/via6522.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/z8530_scc.sv
-set_global_assignment -name VHDL_FILE rtl/generic_ram_ena.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_alu.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_clkgen.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_core.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_decoder.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_dmem_ctrl.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_io_d.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_io_g.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_io_in.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_io_l.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_io_pack-p.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_mnemonic_pack-p.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_opt_pack-p.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_pack-p.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_pmem_ctrl.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_por.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_reset.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_sio.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_skip.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_stack.vhd
-set_global_assignment -name VHDL_FILE rtl/t400_timer.vhd
-set_global_assignment -name VHDL_FILE rtl/t410_rom-e.vhd
-set_global_assignment -name VHDL_FILE rtl/t420_notri.vhd
-set_global_assignment -name VHDL_FILE rtl/t420_rom.vhd
-set_global_assignment -name VHDL_FILE rtl/tb_pack-p.vhd
+# --- COP421 (t420): EXPERIMENT — the FPGA now uses the GHDL-generated Verilog
+# --- (rtl/t420_notri.v) instead of the VHDL sources, so the FPGA and the
+# --- Verilator sim share ONE COP model. The .v is self-contained (all t400_*
+# --- sub-modules + t420_rom microcode + generic_ram_ena RAM) and carries the
+# --- ck_en_s / io_g_s driver fixes. To REVERT: restore these VHDL_FILE lines
+# --- and remove the VERILOG_FILE line below.
+# set_global_assignment -name VHDL_FILE rtl/generic_ram_ena.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_alu.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_clkgen.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_core.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_decoder.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_dmem_ctrl.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_io_d.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_io_g.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_io_in.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_io_l.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_io_pack-p.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_mnemonic_pack-p.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_opt_pack-p.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_pack-p.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_pmem_ctrl.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_por.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_reset.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_sio.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_skip.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_stack.vhd
+# set_global_assignment -name VHDL_FILE rtl/t400_timer.vhd
+# set_global_assignment -name VHDL_FILE rtl/t410_rom-e.vhd
+# set_global_assignment -name VHDL_FILE rtl/t420_notri.vhd
+# set_global_assignment -name VHDL_FILE rtl/t420_rom.vhd
+# set_global_assignment -name VHDL_FILE rtl/tb_pack-p.vhd
+set_global_assignment -name VERILOG_FILE rtl/t420_notri.v
 set_global_assignment -name SYSTEMVERILOG_FILE Lisa.sv

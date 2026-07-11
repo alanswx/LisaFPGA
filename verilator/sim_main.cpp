@@ -271,8 +271,10 @@ int soft_reset = 0;
 vluint64_t soft_reset_time = 0;
 
 //
-// IWM emulation
-#include "defc.h"
+// IWM emulation (vestigial IIgs leftovers). defc.h pulls in iwm.h/protos.h from
+// the GSplus/KEGS tree, which aren't part of this repo; the only symbol needed
+// here is word32. Provide it directly instead of the heavy (unbuildable) include.
+typedef uint32_t word32;
 int g_c031_disk35;
 word32 g_vbl_count;
 
@@ -1296,7 +1298,7 @@ static void PrintHeadlessStatus()
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__irq_flags,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__kbd_via__DOT__irq_mask,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__KBIR,
-		VERTOPINTERN->emu__DOT___PRES_esprofile,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT___PRES,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__pp_via__DOT__prb,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__pp_via__DOT__ddrb,
 		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_pen_fall_cnt,
@@ -1471,8 +1473,10 @@ static bool ObserveCrashTrace()
 		"MALEn=%d buffered_RA=%02X row=%02X col=%02X sram_word=%05X decoded=%06X\n",
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__A,
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__A << 1,
-		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__latched_MMU_address__BRA__20__03a13__KET__,
-		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__latched_MMU_address__BRA__12__03a9__KET__,
+		// latched_MMU_address is a single 12-bit field for RTL bits [20:9];
+		// [20:13] = field bits [11:4], [12:9] = field bits [3:0].
+		((VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__latched_MMU_address >> 4) & 0xFF),
+		(VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__latched_MMU_address & 0xF),
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__MMU_adder_out,
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT__TD,
 		VERTOPINTERN->emu__DOT__core__DOT__cpu_board__DOT___MALE,

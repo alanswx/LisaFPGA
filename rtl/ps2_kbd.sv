@@ -127,7 +127,12 @@ end
 
 //use BRAM for table
 wire [9:0] key_code = code[ps2_key[8:0]];
-wire [9:0] code[512] =
+// NOTE: a continuous-assignment initializer on an unpacked-array net
+// (`wire [9:0] code[512] = '{...}`) does not parse under this sim's toolchain;
+// use a logic array initialized in an initial block instead. Synthesizes to the
+// same constant lookup ROM in Quartus.
+logic [9:0] code[512];
+initial code =
 '{
 	/* 000 */ 9'h07b,
 	/* 001 */ 9'h07b,	//F9
