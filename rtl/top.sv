@@ -918,14 +918,20 @@ module top(
             .report(mouse_report_selected),
             .M(M_USB)
         );
-        // And now the USB keyboard one
+        // And now the USB keyboard one.
+        // NOTE: this is the legacy Vivado USB-host keyboard path. MiSTer
+        // hardwires KBD_SEL=0 (Lisa.sv) so it is muxed out; the adapter now
+        // takes a key-EVENT stream ({key_code_in, key_press_in} + report) and
+        // the Vivado usb_host only exposes held-key LEVELS, so this path is left
+        // inert (report tied low = no key events) until a level->event converter
+        // is added. key1_selected is passed through only to keep it driven.
         usb_keyboard_interface usb_kbd_interface (
             .clk_sys(clk_sys),
             .usbclk_en(usbclk_en),
             .usbrst(usbrst),
-            .key_modifiers_in(key_modifiers_selected),
-            .key1_in(key1_selected),
-            .report(key_report_selected),
+            .key_code_in(key1_selected),
+            .key_press_in(1'b0),
+            .report(1'b0),
             .KBD_in(KBD_out_USB),
             .KBD_out(KBD_in_USB)
         );

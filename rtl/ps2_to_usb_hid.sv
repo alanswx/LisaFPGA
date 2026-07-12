@@ -1,5 +1,9 @@
 // ps2_to_usb_hid.sv
-// Translates raw PS/2 scancodes from MiSTer HPS to USB HID keycodes and modifiers
+// Translates raw PS/2 scancodes from MiSTer HPS to a stream of key EVENTS.
+// Each make/break emits one `report` pulse carrying {key_code, key_press}.
+// key_code is the HID usage of the key that changed (modifier keys use the HID
+// modifier usages 0xE0-0xE6). This event stream (vs the old single held-key
+// level) lets the adapter queue overlapping keys without dropping releases.
 
 `timescale 1 ns / 1 ps
 
@@ -7,16 +11,16 @@ module ps2_to_usb_hid (
     input  wire        clk,             // System clock
     input  wire        reset,           // System reset
     input  wire [10:0] ps2_key,         // PS/2 scancode from HPS
-    output reg   [7:0] key_modifiers,   // HID modifier byte
-    output reg   [7:0] key_code,        // Active keycode
-    output reg         report           // Pulse when key state changes
+    output reg         key_press,       // 1 = make (down), 0 = break (up)
+    output reg   [7:0] key_code,        // HID usage of the key that changed
+    output reg         report           // 1-clk pulse per mappable key event
 );
 
     reg old_strobe;
     always_ff @(posedge clk) begin
         if (reset) begin
             old_strobe <= 1'b0;
-            key_modifiers <= 8'h00;
+            key_press <= 1'b0;
             key_code <= 8'h00;
             report <= 1'b0;
         end else begin
@@ -119,42 +123,26 @@ module ps2_to_usb_hid (
                     9'h174: hid_code = 8'h4F; // Right
                     9'h172: hid_code = 8'h51; // Down
 
+                    // Modifiers get their HID modifier usages (0xE0-0xE6) so the
+                    // adapter can map them; they are events like any other key.
+                    9'h012: hid_code = 8'hE1; // Left Shift
+                    9'h059: hid_code = 8'hE5; // Right Shift
+                    9'h014: hid_code = 8'hE0; // Left Control  -> Left Option
+                    9'h114: hid_code = 8'hE4; // Right Control -> Right Option
+                    9'h011: hid_code = 8'hE2; // Left Alt      -> Apple
+                    9'h111: hid_code = 8'hE6; // Right Alt     -> Apple
+
                     default: hid_code = 8'h00;
                 endcase
 
-                // Handle modifiers separately
-                case (scancode)
-                    9'h012: begin // Left Shift
-                        key_modifiers[1] <= press;
-                    end
-                    9'h059: begin // Right Shift
-                        key_modifiers[5] <= press;
-                    end
-                    9'h014: begin // Left Control -> Left Option
-                        key_modifiers[0] <= press;
-                    end
-                    9'h114: begin // Right Control -> Right Option
-                        key_modifiers[4] <= press;
-                    end
-                    9'h011: begin // Left Alt -> Apple key
-                        key_modifiers[2] <= press;
-                    end
-                    9'h111: begin // Right Alt -> Apple key
-                        key_modifiers[6] <= press;
-                    end
-                    default: begin
-                        // Regular key
-                        if (hid_code != 8'h00) begin
-                            if (press) begin
-                                key_code <= hid_code;
-                            end else if (key_code == hid_code) begin
-                                key_code <= 8'h00;
-                            end
-                        end
-                    end
-                endcase
-
-                report <= 1'b1;
+                // Emit one event per make/break. No held-key level state, so
+                // overlapping keys (rollover) each produce their own event and
+                // cannot clobber each other's release.
+                if (hid_code != 8'h00) begin
+                    key_code  <= hid_code;
+                    key_press <= press;
+                    report    <= 1'b1;
+                end
             end
         end
     end

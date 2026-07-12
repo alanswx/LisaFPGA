@@ -24,9 +24,9 @@ module usb_keyboard_interface(
     input logic clk_sys,
     input logic usbclk_en,
     input logic usbrst,
-    input logic [7:0] key_modifiers_in,
-    input logic [7:0] key1_in,
-    input logic report,
+    input logic [7:0] key_code_in,   // HID usage of the key that changed
+    input logic       key_press_in,  // 1 = make (down), 0 = break (up)
+    input logic report,              // 1-clk_sys pulse per key event
     input logic KBD_in,
     output logic KBD_out
     );
@@ -40,22 +40,8 @@ module usb_keyboard_interface(
         end
     end
 
-    // The latched versions of the key modifiers and key1
-    logic [7:0] key_modifiers;
-    logic [7:0] key1;
-
-    // Latch the key modifiers and keycodes on the rising edge of report
-    always_ff @(posedge clk_sys, negedge usbrst) begin
-        // On reset, clear all the latched values
-        if (!usbrst) begin
-            key_modifiers <= 8'b0;
-            key1 <= 8'b0;
-        end else if (usbclk_en) if (report) begin
-            // If report is asserted, latch the key states
-            key_modifiers <= key_modifiers_in;
-            key1 <= key1_in;
-        end
-    end
+    // (Key events are no longer latched as a single held-key level; they are
+    //  mapped and queued in the FIFO below.)
 
     // We've got the key states latched now, so let's output them in the format the Lisa expects
     // This is the trickier part
@@ -231,263 +217,69 @@ module usb_keyboard_interface(
     end
 
 
-    // A state counter that's set when we start a reset sequence
-    // In which case we send 0x80 first, then 0xBF
-    logic [1:0] kbd_reset_sequence;
+    // ==== Key-event FIFO ===================================================
+    // Each PS/2 make/break arrives as an event (report pulse + key_code_in +
+    // key_press_in). We map it to a Lisa keycode and queue it; the serial
+    // machine below drains one byte per Lisa poll. Because every make and break
+    // is an independent queued event, overlapping keys (rollover) can no longer
+    // drop a release the way the old single held-key level did.
+    localparam int FD = 16;                  // FIFO depth (power of two)
+    logic [7:0] kfifo [0:FD-1];
+    logic [4:0] wr_ptr;                      // 5th bit lets wr-rd measure fullness
+    logic [4:0] rd_ptr;
+    logic       caps_lock_state;
+    logic       reset_seq;                   // set by serial FSM: reload ID seq
+    logic       reset_seq_d;
 
-    // Another difference we need to account for:
-    // The USB keyboard sends a keycode as long as the key is held down and then sends 0 when it's released
-    // The Lisa keyboard protocol expects key press and key release to be separate events
-    // So we need to essentially detect edges on the key1 signal and only send the keycode when it rises (press) or falls (release)
-    // We'll do this by keeping track of the previous key1 value and comparing it to the current one
-    logic [7:0] prev_key1;
-    logic [7:0] prev_key_modifiers;
+    wire fifo_empty = (wr_ptr == rd_ptr);
+    wire fifo_full  = ((wr_ptr - rd_ptr) >= 5'd16);
 
-    // An enum for the states of each modifier key
-    typedef enum logic [1:0] {
-        DOWN,
-        UP
-    } modifier_state_t;
+    // Map a HID usage (regular table code, modifier usages 0xE0-0xE6, or caps
+    // 0x39) to its 7-bit Lisa keycode base (0 = no mapping / ignore).
+    logic [7:0] lisa_base;
+    always_comb begin
+        case (key_code_in)
+            8'hE1, 8'hE5: lisa_base = 8'h7E;   // Shift  (L/R)
+            8'hE0:        lisa_base = 8'h7C;   // Left Option  (L Ctrl)
+            8'hE4:        lisa_base = 8'h4E;   // Right Option (R Ctrl)
+            8'hE2, 8'hE6: lisa_base = 8'h7F;   // Apple  (L/R Alt)
+            8'h39:        lisa_base = 8'h7D;   // Caps Lock (special toggle below)
+            default:      lisa_base = (key_code_in < 8'h80) ? lisa_keycode_hid[key_code_in[6:0]] : 8'h00;
+        endcase
+    end
 
-    // Now create some signals for storing the previous states of said keys: shift (left/right are same), left/right option, and apple key
-    modifier_state_t prev_shift_state, prev_left_option_state, prev_right_option_state, prev_apple_state;
-    // This signal keeps track of the caps lock state
-    logic caps_lock_state;
-
-    // A flag to indicate the first run of any of the modifier key handlers
-    logic first_run;
-
-    // Bit masks for the modifier keys
-    localparam logic [7:0] SHIFT_MASK = 8'h22; // Left and right shift
-    localparam logic [7:0] LEFT_OPTION_MASK = 8'h01; // Left option (mapped to the left control key)
-    localparam logic [7:0] RIGHT_OPTION_MASK = 8'h10; // Right option (mapped to the right control key)
-    localparam logic [7:0] APPLE_MASK = 8'h44; // Left Apple (mapped to left and right alt keys)
-
-    typedef enum logic [6:0] {
-        WAIT,
-        HANDLE_SHIFT,
-        HANDLE_LEFT_OPTION,
-        HANDLE_RIGHT_OPTION,
-        HANDLE_APPLE,
-        HANDLE_REGULAR_DOWN,
-        HANDLE_REGULAR_UP
-    } decoder_state_t;
-
-    decoder_state_t decoder_state;
-
-    // Boolean flag to say whether or not keycode was actually sent
-    logic sent_keycode;
-
+    // Push side: runs every clk_sys (ungated) so it never misses the one-cycle
+    // report pulse. Owns kfifo, wr_ptr and caps_lock_state.
     always_ff @(posedge clk_sys, negedge usbrst) begin
         if (!usbrst) begin
-            prev_key1 <= 8'd0;
-            prev_key_modifiers <= 8'd0;
+            // Power-up: preload the keyboard power-on ID sequence 0x80,0xBF.
+            kfifo[0] <= 8'h80;
+            kfifo[1] <= 8'hBF;
+            wr_ptr <= 5'd2;
             caps_lock_state <= 1'b0;
-            lisa_keycode <= 8'd0;
-            kbd_reset_sequence <= 2'd0;
-            prev_shift_state <= UP;
-            prev_left_option_state <= UP;
-            prev_right_option_state <= UP;
-            prev_apple_state <= UP;
-            decoder_state <= WAIT;
-            sent_keycode <= 1'b1;
-            first_run <= 1'b1;
-        end else if (usbclk_en) begin
-            if (kbd_state == KBD_RESET || kbd_reset_sequence != 2'd0) begin
-                // If we end up here, we need to reset the keyboard interface
-                if (kbd_reset_sequence == 2'd0) begin
-                    // If we're in step 0, start the reset sequence by sending 0x80 to the Lisa
-                    lisa_keycode <= 8'h80;
-                    kbd_reset_sequence <= 2'd1; // And move to step 1
-                end else if (kbd_reset_sequence == 2'd1 && kbd_state == FINISHED) begin
-                    // Next, send 0xBF, being sure to wait for the state machine to finish sending the first byte
-                    lisa_keycode <= 8'hBF;
-                    kbd_reset_sequence <= 2'd2; // And move to step 2
-                end else if (kbd_reset_sequence == 2'd2 && kbd_state == FINISHED) begin
-                    // After sending both bytes, clear lisa_keycode to indicate no key to send
-                    lisa_keycode <= 8'd0;
-                    // And clear the reset sequence counter
-                    kbd_reset_sequence <= 2'd0;
+            reset_seq_d <= 1'b0;
+        end else begin
+            reset_seq_d <= reset_seq;
+            if (reset_seq && !reset_seq_d) begin
+                // Lisa requested a reset: drop queued keys, reload the ID seq.
+                kfifo[0] <= 8'h80;
+                kfifo[1] <= 8'hBF;
+                wr_ptr <= 5'd2;
+                caps_lock_state <= 1'b0;
+            end else if (report && !fifo_full) begin
+                if (key_code_in == 8'h39) begin
+                    // Caps Lock is a locking key: toggle on make only; the Lisa
+                    // wants 0x7D with bit7 = the (pre-toggle) lock state.
+                    if (key_press_in) begin
+                        caps_lock_state <= ~caps_lock_state;
+                        kfifo[wr_ptr[3:0]] <= {caps_lock_state, 7'h7D};
+                        wr_ptr <= wr_ptr + 5'd1;
+                    end
+                end else if (lisa_base != 8'h00) begin
+                    // bit7 = 1 on press (down), 0 on release (up).
+                    kfifo[wr_ptr[3:0]] <= {key_press_in, lisa_base[6:0]};
+                    wr_ptr <= wr_ptr + 5'd1;
                 end
-                // Also, clear prev_key1 and prev_key_modifiers to avoid spurious key events after reset
-                prev_key1 <= 8'd0;
-                prev_key_modifiers <= 8'd0;
-            end else begin
-                // Otherwise, handle key events as normal, which we do with a state machine
-                case (decoder_state)
-                    WAIT: begin
-                        // In the idle state, we just wait until we see a change in key1 or the modifiers
-                        if (key1 != prev_key1 || key_modifiers != prev_key_modifiers) begin
-                            // And then we move to HANDLE_SHIFT to start processing modifier keys
-                            first_run <= 1'b1; // Set the first run flag
-                            sent_keycode <= 1'b1; // Set the flag so we don't automatically fall through the shift handler
-                            prev_key_modifiers <= key_modifiers; // Update prev_key_modifiers to the new modifier value
-                            decoder_state <= HANDLE_SHIFT;
-                        end
-                    end
-                    HANDLE_SHIFT: begin
-                        first_run <= 1'b0; // Clear the first run flag
-                        // Check the shift key state
-                        if (((key_modifiers & SHIFT_MASK) != 8'd0) && (prev_shift_state == UP)) begin
-                            // If we end up here, then the shift key has just been pressed
-                            lisa_keycode <= 8'h7E | 8'b10000000; // So send out the Lisa Shift keycode with bit 7 set
-                            prev_shift_state <= DOWN;
-                            sent_keycode <= 1'b1; // Set the flag to say we sent something
-                        end else if (((key_modifiers & SHIFT_MASK) == 8'd0) && (prev_shift_state == DOWN)) begin
-                            // Here's where we go if the shift key has just been released
-                            lisa_keycode <= 8'h7E & 8'b01111111; // Send the keycode again with bit 7 cleared
-                            prev_shift_state <= UP;
-                            sent_keycode <= 1'b1; // Set the flag to say we sent something
-                        end else if (first_run) begin
-                            sent_keycode <= 1'b0; // No change in shift key state, so nothing sent
-                        end
-                        if (kbd_state == FINISHED || !sent_keycode) begin
-                            // Wait until after we've sent the keycode before moving to the next state
-                            // Or just go straight to the next state if we didn't send anything
-                            first_run <= 1'b1; // Set the first run flag again
-                            sent_keycode <= 1'b1; // Set the flag so we don't automatically fall through next time
-                            lisa_keycode <= 8'd0; // Clear lisa_keycode to indicate no key to send
-                            decoder_state <= HANDLE_LEFT_OPTION;
-                        end
-                    end
-                    HANDLE_LEFT_OPTION: begin
-                        first_run <= 1'b0; // Clear the first run flag
-                        // Check the left option key state
-                        if (((key_modifiers & LEFT_OPTION_MASK) != 8'd0) && (prev_left_option_state == UP)) begin
-                            // Left option key pressed
-                            lisa_keycode <= 8'h7C | 8'b10000000; // Lisa Left Option keycode with bit 7 set
-                            prev_left_option_state <= DOWN;
-                            sent_keycode <= 1'b1; // Set the flag to say we sent something
-                        end else if (((key_modifiers & LEFT_OPTION_MASK) == 8'd0) && (prev_left_option_state == DOWN)) begin
-                            // Left option key released
-                            lisa_keycode <= 8'h7C & 8'b01111111; // Lisa Left Option keycode with bit 7 cleared
-                            prev_left_option_state <= UP;
-                            sent_keycode <= 1'b1; // Set the flag to say we sent something
-                        end else if (first_run) begin
-                            sent_keycode <= 1'b0; // No change in left option key state, so nothing sent
-                        end
-                        if (kbd_state == FINISHED || !sent_keycode) begin
-                            sent_keycode <= 1'b1; // Set the flag so we don't automatically fall through next time
-                            first_run <= 1'b1; // Set the first run flag again
-                            lisa_keycode <= 8'd0; // Clear lisa_keycode to indicate no key to send
-                            decoder_state <= HANDLE_RIGHT_OPTION;
-                        end
-                    end
-                    HANDLE_RIGHT_OPTION: begin
-                        first_run <= 1'b0; // Clear the first run flag
-                        // Check the right option key state
-                        if (((key_modifiers & RIGHT_OPTION_MASK) != 8'd0) && (prev_right_option_state == UP)) begin
-                            // Right option key pressed
-                            lisa_keycode <= 8'h4E | 8'b10000000; // Lisa Right Option keycode with bit 7 set
-                            prev_right_option_state <= DOWN;
-                            sent_keycode <= 1'b1; // Set the flag to say we sent something
-                        end else if (((key_modifiers & RIGHT_OPTION_MASK) == 8'd0) && (prev_right_option_state == DOWN)) begin
-                            // Right option key released
-                            lisa_keycode <= 8'h4E & 8'b01111111; // Lisa Right Option keycode with bit 7 cleared
-                            prev_right_option_state <= UP;
-                            sent_keycode <= 1'b1; // Set the flag to say we sent something
-                        end else if (first_run) begin
-                            sent_keycode <= 1'b0; // No change in right option key state, so nothing sent
-                        end
-                        if (kbd_state == FINISHED || !sent_keycode) begin
-                            sent_keycode <= 1'b1; // Set the flag so we don't automatically fall through next time
-                            first_run <= 1'b1; // Set the first run flag again
-                            lisa_keycode <= 8'd0; // Clear lisa_keycode to indicate no key to send
-                            decoder_state <= HANDLE_APPLE;
-                        end
-                    end
-                    HANDLE_APPLE: begin
-                        first_run <= 1'b0; // Clear the first run flag
-                        // Check the Apple key state
-                        if (((key_modifiers & APPLE_MASK) != 8'd0) && (prev_apple_state == UP)) begin
-                            // Apple key pressed
-                            lisa_keycode <= 8'h7F | 8'b10000000; // Lisa Apple keycode with bit 7 set
-                            prev_apple_state <= DOWN;
-                            sent_keycode <= 1'b1; // Set the flag to say we sent something
-                        end else if (((key_modifiers & APPLE_MASK) == 8'd0) && (prev_apple_state == DOWN)) begin
-                            // Apple key released
-                            lisa_keycode <= 8'h7F & 8'b01111111; // Lisa Apple keycode with bit 7 cleared
-                            prev_apple_state <= UP;
-                            sent_keycode <= 1'b1; // Set the flag to say we sent something
-                        end else if (first_run) begin
-                            sent_keycode <= 1'b0; // No change in Apple key state, so nothing sent
-                        end
-                        if (kbd_state == FINISHED || !sent_keycode) begin
-                            first_run <= 1'b1; // Set the first run flag again
-                            sent_keycode <= 1'b1; // Set the flag so we don't automatically fall through next time
-                            lisa_keycode <= 8'd0; // Clear lisa_keycode to indicate no key to send
-                            // We're finally done with modifier keys, so move to handling regular keys
-                            // Decide whether it's a key down or key up event and go to the appropriate state
-                            if (key1 != 8'd0 && key1 != prev_key1) begin
-                                // Key down event
-                                decoder_state <= HANDLE_REGULAR_DOWN;
-                            end else if (key1 != prev_key1) begin
-                                // Key up event
-                                decoder_state <= HANDLE_REGULAR_UP;
-                                // No change in key1, just the modifiers, so nothing to do and go back and wait for the next event
-                            end else begin
-                                decoder_state <= WAIT;
-                                prev_key1 <= key1; // Don't forget to update prev_key1 here even if we don't actually do anything
-                            end
-                        end
-                    end
-                    HANDLE_REGULAR_DOWN: begin
-                        first_run <= 1'b0; // Clear the first run flag
-                        // Handle regular key down event
-                        if (key1 == 8'h39) begin
-                            // Caps Lock key pressed, toggle the caps_lock_state
-                            if (first_run) begin
-                                // Make sure we only toggle it once per key press though
-                                caps_lock_state <= ~caps_lock_state;
-                            end
-                            lisa_keycode <= lisa_keycode_hid[key1] | {~caps_lock_state, 7'b0000000}; // Set or clear bit 7 based on new caps lock state
-                        end else begin
-                            // For other keys, just set lisa_keycode normally
-                            lisa_keycode <= lisa_keycode_hid[key1] | 8'b10000000; // Set bit 7 to indicate key press
-                            if (lisa_keycode_hid[key1] != 8'd0) begin
-                                // Only say that we sent something if lisa_keycode is valid; some keys may not have a mapping
-                                sent_keycode <= 1'b1; // Set the flag to say we sent something
-                            end else begin
-                                sent_keycode <= 1'b0; // No valid keycode to send
-                            end
-                        end
-                        // Now go back to idle to wait for the next event once the keycode has been sent
-                        if (kbd_state == FINISHED || !sent_keycode) begin
-                            first_run <= 1'b1; // Set the first run flag again
-                            sent_keycode <= 1'b1; // Set the flag so we don't automatically fall through next time
-                            prev_key1 <= key1; // Don't forget to update prev_key1 here
-                            lisa_keycode <= 8'd0; // Clear lisa_keycode to indicate no key to send
-                            decoder_state <= WAIT;
-                        end
-                    end
-                    HANDLE_REGULAR_UP: begin
-                        // Handle a regular key up event
-                        // Look up the Lisa keycode for prev_key1
-                        if (prev_key1 != 8'h39) begin
-                            // Only send release codes for non-Caps Lock keys
-                            // For Caps Lock, we only care about the press event to toggle the state
-                            lisa_keycode <= lisa_keycode_hid[prev_key1] & 8'b01111111; // Clear bit 7 to indicate key release (should already be clear)
-                            if (lisa_keycode_hid[prev_key1] != 8'd0) begin
-                                // Only say that we sent something if lisa_keycode is valid; some keys may not have a mapping
-                                sent_keycode <= 1'b1; // Set the flag to say we sent something
-                            end else begin
-                                sent_keycode <= 1'b0; // No valid keycode to send
-                            end
-                        end else begin
-                            sent_keycode <= 1'b0; // No valid keycode to send for Caps Lock release
-                        end
-                        // Now that we've handled the key release, go back to WAIT once the keycode has been sent
-                        if (kbd_state == FINISHED || !sent_keycode) begin
-                            sent_keycode <= 1'b1; // Set the flag so we don't automatically fall through next time
-                            prev_key1 <= key1; // Don't forget to update prev_key1 here
-                            lisa_keycode <= 8'd0; // Clear lisa_keycode to indicate no key to send
-                            decoder_state <= WAIT;
-                        end
-                    end
-                    default: begin
-                        decoder_state <= WAIT;
-                    end
-                endcase
             end
         end
     end
@@ -498,7 +290,11 @@ module usb_keyboard_interface(
             KBD_out <= 1'b1; // Release KBD_out
             kbd_in_pulse_counter <= 26'd0;
             kbd_bit_timer <= 10'd0;
+            lisa_keycode <= 8'd0;
+            rd_ptr <= 5'd0;
+            reset_seq <= 1'b0;
         end else if (usbclk_en) begin
+            reset_seq <= 1'b0;
             case (kbd_state)
                 IDLE: begin
                     KBD_out <= 1'b1; // Release KBD_out
@@ -520,11 +316,13 @@ module usb_keyboard_interface(
                             kbd_state <= KBD_RESET;
                         end else if (kbd_in_pulse_counter >= 26'd200) begin
                             // KBD_in was low for at about 20us, Lisa wants a key update
-                            if (lisa_keycode != 8'd0) begin
-                                // We've got a key to report, so prepare to send it
+                            if (!fifo_empty) begin
+                                // Pop the next queued keycode and send it.
+                                lisa_keycode <= kfifo[rd_ptr[3:0]];
+                                rd_ptr <= rd_ptr + 5'd1;
                                 kbd_state <= WAIT_TO_SEND;
                             end else begin
-                                // No key to report, go back to idle
+                                // Nothing queued, back to idle.
                                 kbd_state <= IDLE;
                             end
                         end else begin
@@ -633,8 +431,10 @@ module usb_keyboard_interface(
                     kbd_state <= IDLE;
                 end
                 KBD_RESET: begin
-                    // Just go back to idle after we enter this state
-                    // We only need to be in it for 1 cycle so that the always_ff that loads the keycode can see it and act accordingly
+                    // Flush the FIFO and reload 0x80,0xBF (the push side does the
+                    // reload on the reset_seq edge); resync our read pointer.
+                    reset_seq <= 1'b1;
+                    rd_ptr <= 5'd0;
                     kbd_state <= IDLE;
                 end
                 default: begin

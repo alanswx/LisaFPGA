@@ -102,15 +102,15 @@ module emu (
     assign pwrsw_n_out = pwrsw_n;
 
     // Keyboard Adaptor
-    wire [7:0] hid_modifiers;
     wire [7:0] hid_key_code;
+    wire       hid_key_press;
     wire       hid_report;
 
     ps2_to_usb_hid ps2_to_hid_i (
         .clk(clk_sys),
         .reset(reset),
         .ps2_key(ps2_key),
-        .key_modifiers(hid_modifiers),
+        .key_press(hid_key_press),
         .key_code(hid_key_code),
         .report(hid_report)
     );
@@ -118,19 +118,14 @@ module emu (
     wire kbd_serial_wire;
     wire kbd_out_sig;
     wire usbclk_en;
-    reg kbd_report_pend = 0;
-    always @(posedge clk_sys) begin
-        if (usbclk_en && kbd_report_pend) kbd_report_pend <= 1'b0;
-        if (hid_report) kbd_report_pend <= 1'b1;
-    end
 
     usb_keyboard_interface kbd_adapter_i (
         .clk_sys(clk_sys),
         .usbclk_en(usbclk_en),
         .usbrst(~reset),
-        .key_modifiers_in(hid_modifiers),
-        .key1_in(hid_key_code),
-        .report(kbd_report_pend),
+        .key_code_in(hid_key_code),
+        .key_press_in(hid_key_press),
+        .report(hid_report),
         .KBD_in(kbd_serial_wire),
         .KBD_out(kbd_out_sig)
     );
