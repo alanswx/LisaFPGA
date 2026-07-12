@@ -36,12 +36,18 @@ module RAM_matrix(
     logic [7:0] row_addr; // Latched row address (from A0-A7)
     logic [7:0] col_addr; // Latched column address (from A0-A7)
 
-    always_ff @(negedge (&_RAS)) begin
+    // The sim toolchain rejects an edge on a reduction expression directly;
+    // name the reduced nets so the @(negedge ...) has a simple signal to
+    // sensitize on. Quartus is happy with these intermediate wires too.
+    wire all_ras = &_RAS;
+    wire all_cas = &_CAS;
+
+    always_ff @(negedge all_ras) begin
         row_addr <= A;
     end
 
     // Latch the column address on the falling edge of _CAS (if RAS is already active)
-    always_ff @(negedge (&_CAS)) begin
+    always_ff @(negedge all_cas) begin
         if (!_RAS[0] | !_RAS[1] | !_RAS[2] | !_RAS[3]) // Only latch if RAS is already low
             col_addr <= A;
     end

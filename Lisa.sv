@@ -541,7 +541,10 @@ module emu (
     // missing before: din/dout went to dangling local wires, so RAM writes
     // stored a constant and reads returned an undriven bus — the boot ROM's
     // memory sizing then found "no memory" and parked the CPU.)
-    assign D_SRAM = _OE_SRAM ? 16'bZ : DIN_SRAM;
+    // Drive read data from a bridge-local latch (captured at ack for THIS port-0
+    // transaction), never combinationally from the controller's shared dout
+    // register (which another port/late transaction can clobber -> corruption).
+    assign D_SRAM = _OE_SRAM ? 16'bZ : lisa_dout_lat;
 
     // Bridge: one Lisa memory cycle becomes one req/ack transaction on port 0 of
     // the controller. _CE_SRAM falls one clk after RAS+CAS are both active, at
@@ -560,14 +563,38 @@ module emu (
     reg         ce_sram_d = 1;
     reg         wr_pending = 0;
     reg  [11:0] lisa_rd_cnt = 0, lisa_wr_cnt = 0; // DEBUG: activity counters for LRAM probe
+    // Read-data latch + bridge-race instrumentation (see the D_SRAM fix above and
+    // the LRAM observer below). lisa_dout_lat captures the port-0 read result at
+    // ack; overlap_cnt counts the corruption race (a new Lisa memory cycle begins
+    // before the previous SDRAM transaction has acked); max_latency = worst-case
+    // clk_sys cycles from req to ack (compare vs the per-cycle budget: 32@1x).
+    reg  [15:0] lisa_dout_lat = 0;
+    reg         lisa_is_read  = 0;
+    reg         lisa_ack_d    = 0;
+    reg  [23:0] overlap_cnt   = 0;
+    reg  [15:0] max_latency   = 0;
+    reg  [15:0] cur_latency   = 0;
     always_ff @(posedge clk_sys) begin
-        ce_sram_d <= _CE_SRAM;
+        ce_sram_d  <= _CE_SRAM;
+        lisa_ack_d <= lisa_ack;
+        // outstanding-transaction latency counter
+        if (lisa_req != lisa_ack) cur_latency <= cur_latency + 1'b1;
+        else                      cur_latency <= 0;
+        // transaction completed (ack toggled): record max latency; for a read,
+        // capture the now-valid controller dout into the stable bridge latch.
+        if (lisa_ack != lisa_ack_d) begin
+            if (cur_latency > max_latency) max_latency <= cur_latency;
+            if (lisa_is_read) lisa_dout_lat <= DIN_SRAM;
+        end
         if (ce_sram_d && !_CE_SRAM) begin
-            // Lisa memory cycle begins (RAS+CAS both active, address stable)
+            // Lisa memory cycle begins (RAS+CAS both active, address stable).
+            // If the previous transaction has NOT yet acked, this is the race.
+            if (lisa_req != lisa_ack) overlap_cnt <= overlap_cnt + 1'b1;
             if (!_OE_SRAM) begin // read cycle: issue now
                 lisa_addr <= {4'b0000, A_SRAM};
                 lisa_wrl  <= 1'b0;
                 lisa_wrh  <= 1'b0;
+                lisa_is_read <= 1'b1;
                 lisa_req  <= ~lisa_req;
                 lisa_rd_cnt <= lisa_rd_cnt + 1'd1;
             end else begin // write cycle: wait for the data strobes
@@ -580,55 +607,27 @@ module emu (
             lisa_din  <= D_SRAM; // top drives write data onto D_SRAM during writes
             lisa_wrl  <= ~_LDS_SRAM;
             lisa_wrh  <= ~_UDS_SRAM;
+            lisa_is_read <= 1'b0;
             lisa_req  <= ~lisa_req;
             wr_pending <= 1'b0;
             lisa_wr_cnt <= lisa_wr_cnt + 1'd1;
         end
     end
 
-    // DEBUG (bring-up ISSP "LRAM"): SDRAM self-test on controller port 1.
-    // After PLL lock, write two signature words, then re-read them every ~0.4s
-    // (the re-read also proves refresh/retention). Expected on the probe:
-    // st_rd0=0xA5C3, st_rd1=0x5A3C, st_loops incrementing.
-    reg         st_req = 0;
-    wire        st_ack;
-    reg  [24:1] st_addr;
-    reg  [15:0] st_din;
-    reg         st_wr;
-    wire [15:0] st_dout;
-    reg  [3:0]  st_state = 0;
-    reg  [15:0] st_rd0 = 0, st_rd1 = 0;
-    reg  [3:0]  st_loops = 0;
-    reg  [24:0] st_timer = 0;
-    always_ff @(posedge clk_sys) begin
-        if (!pll_locked) begin
-            st_state <= 0;
-            st_timer <= 0;
-        end else case (st_state)
-            0: begin st_addr <= 24'h01234; st_din <= 16'hA5C3; st_wr <= 1; st_req <= ~st_req; st_state <= 1; end
-            1: if (st_ack == st_req) st_state <= 2;
-            2: begin st_addr <= 24'h04321; st_din <= 16'h5A3C; st_wr <= 1; st_req <= ~st_req; st_state <= 3; end
-            3: if (st_ack == st_req) st_state <= 4;
-            4: begin st_addr <= 24'h01234; st_wr <= 0; st_req <= ~st_req; st_state <= 5; end
-            5: if (st_ack == st_req) begin st_rd0 <= st_dout; st_state <= 6; end
-            6: begin st_addr <= 24'h04321; st_wr <= 0; st_req <= ~st_req; st_state <= 7; end
-            7: if (st_ack == st_req) begin st_rd1 <= st_dout; st_loops <= st_loops + 1'd1; st_state <= 8; end
-            8: begin // idle ~0.4s, then re-read (retention/refresh check)
-                st_timer <= st_timer + 1'd1;
-                if (&st_timer) st_state <= 4;
-            end
-            default: st_state <= 0;
-        endcase
-    end
-
-    wire [63:0] ram_dbg = { st_rd1, st_rd0, st_loops, st_state, lisa_wr_cnt, lisa_rd_cnt };
+    // DEBUG (ISSP "LRAM" = PASSIVE bridge-race observer, remove for release):
+    // No SDRAM port of its own (the old peek port perturbed the marginal SDRAM).
+    // Exposes the bridge instrumentation so one JTAG read shows whether the
+    // Lisa->SDRAM bridge is losing/overlapping transactions under load:
+    //   overlap_cnt  - Lisa cycles that began before the previous ack (the race);
+    //                  should stay 0. Climbing => the corruption mechanism.
+    //   max_latency  - worst-case clk_sys cycles req->ack (budget 32@1x/16@2x/8@4x)
+    //   rd/wr_cnt    - port-0 activity counters (liveness)
+    wire [63:0] ram_dbg = { max_latency, overlap_cnt, lisa_wr_cnt, lisa_rd_cnt };
     altsource_probe #(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
         .instance_id ("LRAM"), .probe_width (64), .source_width (1),
         .source_initial_value ("0"), .enable_metastability ("NO")
     ) u_ram_probe ( .source(), .probe(ram_dbg), .source_clk(clk_sys), .source_ena(1'b1) );
-
-    // (Removed the LBUS write/read-back checker — SDRAM path confirmed good.)
 
     // Sorgelig's proven MiSTer SDRAM controller. It generates SDRAM_CLK itself
     // (DDIO, 180 degrees from clk_sys), so the phase-shifted clk_mem PLL output
@@ -652,8 +651,8 @@ module emu (
         .addr0(lisa_addr), .wrl0(lisa_wrl), .wrh0(lisa_wrh),
         .din0(lisa_din), .dout0(DIN_SRAM), .req0(lisa_req), .ack0(lisa_ack),
 
-        .addr1(st_addr), .wrl1(st_wr), .wrh1(st_wr),
-        .din1(st_din), .dout1(st_dout), .req1(st_req), .ack1(st_ack),
+        .addr1(24'd0), .wrl1(1'b0), .wrh1(1'b0),
+        .din1(16'd0), .dout1(), .req1(1'b0), .ack1(),
 
         .addr2(24'd0), .wrl2(1'b0), .wrh2(1'b0),
         .din2(16'd0), .dout2(), .req2(1'b0), .ack2()

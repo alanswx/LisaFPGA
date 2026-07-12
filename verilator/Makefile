@@ -46,7 +46,7 @@ CFLAGS += $(CC_OPT) $(CC_DEFINE) -Iimgui
 LDFLAGS = $(LIBS)
 EXE = ./obj_dir/Vemu
 #V_OPT = -O3 --x-assign fast --x-initial fast --noassert
-V_OPT = -O3 --x-assign fast --x-initial 0 --noassert -Wno-fatal
+V_OPT = -O3 --x-assign fast --x-initial 0 --noassert -Wno-fatal -Wno-BLKANDNBLK -Wno-UNOPTFLAT -Wno-WIDTH -Wno-MULTIDRIVEN
 #CC_OPT = -O
 CC_OPT = -O3
 
