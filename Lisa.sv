@@ -216,8 +216,27 @@ module emu (
         .ioctl_wait(1'b0),
 
         .ps2_key(ps2_key),
-        .ps2_mouse(ps2_mouse)
+        .ps2_mouse(ps2_mouse),
+
+        // MiSTer host RTC (MSM6242B BCD) -> seeds the Lisa COP421 clock at boot
+        .RTC(rtc_raw)
     );
+
+    // ---- RTC: convert host time to the Lisa COP clock packet -----------------
+    wire [64:0] rtc_raw;
+    wire [63:0] rtc_nibbles;
+    wire        rtc_valid;
+    wire        rtc_load_req;
+    rtc_lisa rtc_conv (
+        .clk(clk_sys),
+        .rst(~pll_locked),
+        .rtc(rtc_raw),
+        .nibbles(rtc_nibbles),
+        .valid(rtc_valid),
+        .load_req(rtc_load_req)
+    );
+    // seeding-complete signal comes back from the IO board's COP sequencer
+    wire rtc_seed_done;
 
     // Single core PLL: produces the 81.5 MHz master (clk_sys). Every other Lisa
     // clock is divided from clk_sys inside top/clock_divider/dotck_mmcm.
@@ -786,17 +805,30 @@ module emu (
         .img_size(img_size)
     );
 
-    // Auto power-on: the Lisa's COP only powers the machine on when it sees a
-    // power-button press (a falling edge on _PWRSW). _PWRSW was tied high, so the
-    // machine could never turn on. Hold it high for ~0.4s after config (let the
-    // COP finish its internal power-on reset), then drive it low once to simulate
-    // the button press. top.sv stretches this into a bounded pulse to the COP.
-    reg [25:0] pwron_cnt = 26'd0;
-    reg        lisa_pwrsw_n = 1'b1;
+    // Power button. The Lisa's COP powers the machine on/off on each power-button
+    // press = a falling edge on _PWRSW (top.sv stretches it into a bounded COP
+    // pulse). We (1) auto-press once ~0.41s after config to boot, and (2) map host
+    // F11 to the power button so pressing it while running triggers the Lisa's
+    // clean power-OFF (the OS saves state) -- so quitting the core doesn't corrupt
+    // the ProFile. The RTC seed no longer gates power-on (it now runs AFTER the COP
+    // is powered -- see the IO_board seed sequencer -- since the COP ignores
+    // commands while off), which also removes a seed<->power deadlock.
+    reg [27:0] pwron_cnt = 28'd0;
+    reg        auto_pwr_done = 1'b0;
+    reg [19:0] pwr_pulse = 20'd0;    // nonzero => _PWRSW asserted (a press in progress)
+    reg        ps2_tgl_d = 1'b0;
     always @(posedge clk_sys) begin
-        if (!pwron_cnt[25]) pwron_cnt <= pwron_cnt + 26'd1; // ~2^25/81.5MHz ~= 0.41s
-        else                lisa_pwrsw_n <= 1'b0;           // then assert the power press
+        if (!pwron_cnt[27]) pwron_cnt <= pwron_cnt + 28'd1;
+        if (pwron_cnt[25] && !auto_pwr_done) begin          // one automatic power-on press
+            auto_pwr_done <= 1'b1;
+            pwr_pulse     <= 20'hFFFFF;
+        end
+        ps2_tgl_d <= ps2_key[10];                           // F11 (scancode 0x78) key-down
+        if (ps2_key[10] != ps2_tgl_d && ps2_key[9] && !ps2_key[8] && ps2_key[7:0] == 8'h78)
+            pwr_pulse <= 20'hFFFFF;                          // = a power-button press (toggle)
+        if (pwr_pulse != 0) pwr_pulse <= pwr_pulse - 20'd1;
     end
+    wire lisa_pwrsw_n = (pwr_pulse == 20'd0);               // active-low press
 
     // Instantiate Apple Lisa Motherboard core (top)
     top core (
@@ -929,6 +961,13 @@ module emu (
         .CPU_ROM_SEL(status[7]),
         .IO_ROM_SEL(status[8]),
         .usbclk_en(usbclk_en),
+
+        // RTC clock seeding: packet + trigger down, seed-complete back up
+        .rtc_nibbles(rtc_nibbles),
+        .rtc_valid(rtc_valid),
+        .rtc_load_req(rtc_load_req),
+        .rtc_seed_done(rtc_seed_done),
+
         .pll_locked(pll_locked), // DEBUG (bring-up ISSP)
         .pixel_ce(pixel_ce), // DOTCK-rate pixel enable -> CE_PIXEL
         .dbg_va(dbg_va),   // VA_overflow -> vertical blank

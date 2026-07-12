@@ -112,6 +112,15 @@ module IO_board(
     output logic [2:0] VC, // 3-bit volume control for the external speaker amp
     
     input logic IO_ROM_SEL, // Selects whether the I/O board uses ROM revision A8 or 40
+
+    // RTC clock seeding: at boot, before the auto power-on press, a small
+    // sequencer drives the real COP421 with the clock-set command sequence so
+    // the COP keeps host time. Packet = 16 nibbles from rtc_lisa (Lisa.sv).
+    input  logic [63:0] rtc_nibbles,
+    input  logic        rtc_valid,
+    input  logic        rtc_load_req,
+    output logic        rtc_seed_done,
+
     input logic spoof_88 // If set, this makes the FDC RAM at address 0x018 (FCC030) return 0x88 instead of its actual contents
     );
 
@@ -1178,8 +1187,8 @@ module IO_board(
 
     // Now we'll do the mux that gets keyboard and mouse data from the peripherals to the COP
     // It's a dual 4-to-1 mux, with the select lines coming from the COP, and the data lines coming from the keyboard and mouse
-    logic [1:0] KBD_mouse_mux_sel; // A is LSB, B is MSB
-    logic [1:0] KBD_mouse_data_out; // X is LSB, Y is MSB
+    logic [1:0] KBD_mouse_mux_sel /*verilator public_flat_rd*/; // A is LSB, B is MSB
+    logic [1:0] KBD_mouse_data_out /*verilator public_flat_rd*/; // X is LSB, Y is MSB
 
     always_comb begin
         case (KBD_mouse_mux_sel)
@@ -1633,6 +1642,137 @@ module IO_board(
         .irq(KBIR) // The IRQ from this VIA is _KBIR that goes to the CPU board
     );
 
+    // ======================= RTC clock-seed sequencer ========================
+    // Once per FPGA config, before the auto power-on press, drive the real COP421
+    // with the COPS clock-set sequence  0x2C, {0x10|nibble}x16, 0x25  so it keeps
+    // host time. Muxes into the VIA->COP drive path (L_COP_out_int / DDRA) and is
+    // fully transparent + released once done (seq_active=0), so the normal
+    // keyboard path is untouched. No _RESET dependency (init-value one-shot) so a
+    // mid-run reset can never re-seed and collide with live OS COPS traffic. The
+    // per-byte 0x80 idle gap (DDRA low) lets the COP see each command as a fresh
+    // edge even when consecutive nibbles are identical.
+    // Per-byte handshake mirrors the boot ROM COPSCMD routine ($FE0956): stage the
+    // byte on the (idle) bus, wait for CRDY (_READY_COP, low=ready) to go
+    // low->high->low so we land in a FRESH ready window, drive DDRA=0xFF, wait for
+    // CRDY high (the COP has latched), hold briefly, release. Pacing to CRDY (not a
+    // fixed delay) is what makes the COP reliably accept every byte -- especially
+    // the closing 0x25, without which the COP is left stuck in clock-set mode.
+    localparam logic [7:0] RTC_CMD_SET = 8'h2C; // enter set mode, power on, clk stopped
+    localparam logic [7:0] RTC_CMD_GO  = 8'h25; // exit set mode, power on, timer off
+    localparam logic [3:0] RS_WAIT=4'd0, RS_LOW1=4'd1, RS_HIGH1=4'd2, RS_LOW2=4'd3,
+                           RS_DRV=4'd4, RS_HOLD=4'd5, RS_GAP=4'd6, RS_DONE=4'd7,
+                           RS_RD_WAIT=4'd8;   // read-back: capture COP's 0x02 reply (year byte)
+    localparam logic [15:0] RTC_HOLD_T = 16'd64;   // trailing data hold after CRDY high
+    localparam logic [15:0] RTC_GAP_T  = 16'd1024; // idle gap; must exceed the 768-c16m
+                                                   // extended-DDRA hold so the bus fully
+                                                   // returns to 0x80 between bytes
+    localparam logic [15:0] RTC_TMO    = 16'd16384;// per-CRDY-wait timeout: advance anyway
+                                                   // (fallback if CRDY isn't toggling) so the
+                                                   // sequence ALWAYS finishes through 0x25
+
+    logic        seq_active = 1'b0;
+    logic        seq_ddra   = 1'b0;
+    logic  [7:0] seq_byte   = 8'h80;
+    logic  [4:0] seq_idx    = 5'd0;   // 0..17 seed, 18 = 0x02 read-back command
+    logic [15:0] seq_timer  = 16'd0;
+    logic [15:0] seq_tmo    = 16'd0;
+    logic  [3:0] seq_state  = RS_WAIT;
+    logic        seq_started= 1'b0;
+    logic        rdy_s0 = 1'b1, rdy_s = 1'b1, rdy_prev = 1'b1;
+    logic  [7:0] crdy_edge_cnt = 8'd0;   // CRDY transitions observed (heartbeat proof)
+    logic  [7:0] rdbk0 = 8'd0;           // COP's first 0x02 reply byte = the YEAR (0xEy)
+    // The COP only runs its command loop once powered on (ON=1). Seed AFTER ON,
+    // after a settle delay (let the boot ROM's initial COP keyboard handshake
+    // finish) and only when the VIA isn't driving the COP (KBD_via_DDRA==0), so
+    // the seed lands in a quiet window well before the OS reads the clock.
+    logic [21:0] on_dly = 22'd0;
+    logic [11:0] quiet_cnt = 12'd0;   // sustained VIA-idle (KBD_via_DDRA==0) counter
+
+    // byte for sequence position i: 0=0x2C, 1..16=0x10|nibble(i-1), 17=0x25, 18=0x02(read)
+    function automatic logic [7:0] rtc_seqbyte(input logic [4:0] i);
+        logic [5:0] nsel;
+        if (i == 5'd0)       rtc_seqbyte = RTC_CMD_SET;
+        else if (i <= 5'd16) begin
+            nsel = {1'b0, (i - 5'd1)} << 2;             // nibble idx (i-1) * 4
+            rtc_seqbyte = {4'h1, rtc_nibbles[nsel +: 4]};
+        end else if (i == 5'd17) rtc_seqbyte = RTC_CMD_GO;
+        else                     rtc_seqbyte = 8'h02;   // read-clock command
+    endfunction
+
+    wire tmo = (seq_tmo == 16'd0);
+
+    always_ff @(posedge clk_sys) begin
+        if (copck2x_en) begin
+            // sync CRDY into this domain; count its edges (proves the COP heartbeat)
+            rdy_s0 <= _READY_COP; rdy_s <= rdy_s0; rdy_prev <= rdy_s;
+            if (rdy_s != rdy_prev) crdy_edge_cnt <= crdy_edge_cnt + 1'b1;
+            if (seq_tmo != 0) seq_tmo <= seq_tmo - 1'b1;
+            // settle timer since the COP powered on (saturating)
+            if (!ON) on_dly <= 22'd0;
+            else if (!on_dly[21]) on_dly <= on_dly + 1'b1;
+            // sustained VIA-idle: only seed when the COP bus has been quiet a while,
+            // so we don't start on top of a boot-ROM keyboard COP transaction.
+            if (KBD_via_DDRA != 8'h00) quiet_cnt <= 12'd0;
+            else if (!quiet_cnt[11])  quiet_cnt <= quiet_cnt + 1'b1;
+
+            case (seq_state)
+                RS_WAIT: begin
+                    seq_active <= 1'b0; seq_ddra <= 1'b0; seq_byte <= 8'h80;
+                    if (rtc_valid && ON && on_dly[21] && quiet_cnt[11] && !seq_started) begin
+                        seq_started <= 1'b1;
+                        seq_idx     <= 5'd0;
+                        seq_byte    <= rtc_seqbyte(5'd0);
+                        seq_active  <= 1'b1;
+                        seq_ddra    <= 1'b0;           // stage byte, bus still idle
+                        seq_tmo     <= RTC_TMO;
+                        seq_state   <= RS_LOW1;
+                    end
+                end
+                RS_LOW1:  begin seq_active<=1'b1; seq_ddra<=1'b0;   // wait CRDY low (ready)
+                    if (!rdy_s || tmo) begin seq_tmo<=RTC_TMO; seq_state<=RS_HIGH1; end end
+                RS_HIGH1: begin seq_active<=1'b1; seq_ddra<=1'b0;   // wait CRDY high (skip)
+                    if ( rdy_s || tmo) begin seq_tmo<=RTC_TMO; seq_state<=RS_LOW2; end end
+                RS_LOW2:  begin seq_active<=1'b1; seq_ddra<=1'b0;   // wait fresh CRDY low
+                    if (!rdy_s || tmo) begin seq_tmo<=RTC_TMO; seq_state<=RS_DRV; end end
+                RS_DRV:   begin seq_active<=1'b1; seq_ddra<=1'b1;   // DRIVE, wait CRDY high = latched
+                    if ( rdy_s || tmo) begin seq_timer<=RTC_HOLD_T; seq_state<=RS_HOLD; end end
+                RS_HOLD:  begin seq_active<=1'b1; seq_ddra<=1'b1;   // brief trailing hold
+                    if (seq_timer!=0) seq_timer<=seq_timer-1'b1;
+                    else begin seq_ddra<=1'b0; seq_timer<=RTC_GAP_T; seq_state<=RS_GAP; end end
+                RS_GAP:   begin seq_active<=1'b1; seq_ddra<=1'b0;   // idle 0x80, then next byte
+                    if (seq_timer!=0) seq_timer<=seq_timer-1'b1;
+                    else if (seq_idx == 5'd18) begin               // 0x02 sent -> read reply
+                        seq_tmo <= RTC_TMO; seq_state <= RS_RD_WAIT;
+                    end else begin
+                        seq_idx  <= seq_idx + 1'b1;
+                        seq_byte <= rtc_seqbyte(seq_idx + 1'b1);
+                        seq_tmo  <= RTC_TMO;
+                        seq_state<= RS_LOW1;
+                    end end
+                RS_RD_WAIT: begin seq_active<=1'b0; seq_ddra<=1'b0; // release bus; COP drives io_l_o
+                    // capture the COP's first 0x02 reply byte (= year, 0xEy) then finish.
+                    if (DATA_QUEUED_COP) begin rdbk0 <= L_COP_in; seq_state <= RS_DONE; end
+                    else if (tmo)              seq_state <= RS_DONE;
+                    end
+                default:  begin seq_active<=1'b0; seq_ddra<=1'b0; end // RS_DONE
+            endcase
+        end
+    end
+
+    assign rtc_seed_done = (seq_state == RS_DONE);
+
+    // Route the seed through the proven extended-DDRA delivery path (same as the OS
+    // SetClock, which works). Transparent when the sequencer is idle.
+    wire [7:0] KBD_via_DDRA_muxed  = seq_active ? (seq_ddra ? 8'hff : 8'h00) : KBD_via_DDRA;
+    wire [7:0] L_COP_out_int_muxed = seq_active ? seq_byte : L_COP_out_int;
+
+    // DEBUG (folded into LCOP): RTC-seed sequencer visibility (was kc4..kc7).
+    //   [30]done [29]started [28]rtc_valid [27:24]state [23:19]idx
+    //   [18:11]readback(COP 0x02 reply = YEAR 0xEy; 0xEE=slot14 ok, 0xE0/00=unset)
+    //   [10:8]spare [7:0]crdy_edge_cnt
+    wire [31:0] rtc_dbg = { 1'b0, rtc_seed_done, seq_started, rtc_valid,
+                            seq_state, seq_idx, rdbk0, 3'd0, crdy_edge_cnt };
+
     // DEBUG (bring-up ISSP "LCOP", remove for release): COP<->VIA1 handshake
     // monitor. The boot ROM is stuck in ReadCOPS polling for the COP's startup
     // byte; this shows whether the COP raises SO (data queued), what byte it
@@ -1693,9 +1833,10 @@ module IO_board(
         .instance_id ("LCOP"), .probe_width (64), .source_width (1),
         .source_initial_value ("0"), .enable_metastability ("NO")
     ) u_cop_probe ( .source(), .probe({
-        // Full 8-code COPS reset/boot sequence (each byte the COP delivered to
-        // the CPU, in order). kc0 should ideally be 0x80 (RSTCODE).
-        kc0, kc1, kc2, kc3, kc4, kc5, kc6, kc7
+        // First 4 COPS boot codes + RTC-seed sequencer state (kc4..kc7 repurposed
+        // -> rtc_dbg: [30]seed_done [29]started [28]rtc_valid [27:25]state
+        //             [24:20]idx [19:12]seq_byte [11:0]nibbles[31:20](yr,doyH,doyT))
+        kc0, kc1, kc2, kc3, rtc_dbg
     }), .source_clk(clk_sys), .source_ena(1'b1) );
     `endif
 
@@ -1715,7 +1856,7 @@ module IO_board(
     (* ASYNC_REG = "TRUE" *) logic KBD_via_DDRA_int, KBD_via_DDRA_sync;
     always_ff @(posedge clk_sys) begin
         if (c16m_en) begin
-            KBD_via_DDRA_int <= KBD_via_DDRA;
+            KBD_via_DDRA_int <= KBD_via_DDRA_muxed;
             KBD_via_DDRA_sync <= KBD_via_DDRA_int;
         end
     end
@@ -1761,9 +1902,14 @@ module IO_board(
     logic KBD_VIA_DDRA_extended_sync_prev;
     always_ff @(posedge clk_sys) begin
       if (copck2x_en) begin
+        // The RTC seed muxes into L_COP_out_int here (KBD_via_DDRA_int is likewise
+        // muxed above), so the seed uses the SAME extended-DDRA delivery the OS
+        // SetClock uses -- the byte is latched on the DDRA-extended rising edge and
+        // held ~768 c16m after DDRA drops (the trailing hold the COP needs to latch
+        // each command). We now seed post-power, so !_RESET no longer gates this.
         // So latch L_COP_out_int on the rising edge of the DDRA extended signal
         if (KBD_via_DDRA_extended_sync && !KBD_VIA_DDRA_extended_sync_prev) begin
-            L_COP_out <= L_COP_out_int;
+            L_COP_out <= L_COP_out_int_muxed;
         end else if (!KBD_via_DDRA_extended_sync) begin
             // And then when the extended signal goes low, hold L_COP_out at its default of 0x80
             L_COP_out <= 8'b10000000;

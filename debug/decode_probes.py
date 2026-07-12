@@ -39,9 +39,11 @@ for line in sys.stdin:
         print(f"  kv_wr_cnt={bits(v,63,56)} kv_rd_cnt={bits(v,55,48)} bd_nz=0x{bits(v,47,40):02X} vma_cnt={bits(v,39,32)}")
         print(f"  bd_at_wr=0x{bits(v,31,24):02X} kv_last_wr(IO_D@wr)=0x{bits(v,23,16):02X} pp_io_nz=0x{bits(v,15,8):02X} kv_last_addr={bits(v,7,4)}")
     elif name == 'LCOP':
-        print(f"  so_cnt={bits(v,63,56)} ack_cnt={bits(v,55,48)} l_in=0x{bits(v,47,40):02X} l_out=0x{bits(v,39,32):02X}")
-        print(f"  kbdout_cnt={bits(v,31,24)} kbdin_cnt={bits(v,23,16)} DQ={bits(v,15)} ACK={bits(v,14)} _READY={bits(v,13)} ON={bits(v,12)} muxsel={bits(v,11,10)} kbdrst={bits(v,9)} kbd_in={bits(v,8)}")
-        print(f"  KBD_out={bits(v,7)} via_pb0={bits(v,6)} via_ddrb0={bits(v,5)}")
+        # probe = { kc0[63:56], kc1[55:48], kc2[47:40], kc3[39:32], rtc_dbg[31:0] }
+        print(f"  kc0=0x{bits(v,63,56):02X} kc1=0x{bits(v,55,48):02X} kc2=0x{bits(v,47,40):02X} kc3=0x{bits(v,39,32):02X}")
+        print(f"  RTCseed: done={bits(v,30)} started={bits(v,29)} rtc_valid={bits(v,28)} state={bits(v,27,24)} idx={bits(v,23,19)}")
+        print(f"           READBACK year=0x{bits(v,18,11):02X} (0xEE=slot14/2026 OK; 0xE0/0x00=UNSET)  crdy_edge_cnt={bits(v,7,0)}")
+        print(f"           (state 0-8=WAIT/LOW1/HIGH1/LOW2/DRV/HOLD/GAP/DONE/RD_WAIT)")
     elif name == 'LKBD':
         print(f"  kbdsig_edges={bits(v,31,24)} kbdwire_edges={bits(v,23,16)} kbd_out_sig={bits(v,15)} kbd_wire={bits(v,14)}")
     elif name == 'LBUS':

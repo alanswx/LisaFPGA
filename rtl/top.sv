@@ -154,6 +154,13 @@ module top(
         input logic [1:0] SPEED_SEL,
         input logic CPU_ROM_SEL,
         input logic IO_ROM_SEL,
+
+        // RTC clock seeding (from Lisa.sv rtc_lisa -> IO_board COP sequencer)
+        input  logic [63:0] rtc_nibbles,
+        input  logic        rtc_valid,
+        input  logic        rtc_load_req,
+        output logic        rtc_seed_done,
+
         output logic usbclk_en, // ~12MHz usbclk clock-enable (usb runs on clk_sys now)
         input logic clk_sys,  // 81.50016 MHz master clock; all Lisa clocks are divided from this
         input logic pll_locked, // DEBUG (bring-up ISSP): main_pll locked status
@@ -1151,6 +1158,11 @@ module top(
         .dotck_en(dotck_en),
         .VC(VC),
         .IO_ROM_SEL(IO_ROM_SEL),
+        // RTC clock seeding
+        .rtc_nibbles(rtc_nibbles),
+        .rtc_valid(rtc_valid),
+        .rtc_load_req(rtc_load_req),
+        .rtc_seed_done(rtc_seed_done),
         .spoof_88(GPIO[0])
     );
 
