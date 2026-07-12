@@ -1,5 +1,6 @@
 set_global_assignment -name QIP_FILE sys/sys.qip
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram_ctrl.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram_lisa.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ps2_kbd.sv
 set_global_assignment -name VERILOG_FILE rtl/ps2_mouse.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/pll.sv

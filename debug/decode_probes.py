@@ -24,9 +24,8 @@ for line in sys.stdin:
     elif name == 'LMOU':
         print(f"  pkt_cnt={bits(v,63,48)} rep_cnt={bits(v,47,32)} dx=0x{bits(v,31,24):02X} dy=0x{bits(v,23,16):02X} flags=0x{bits(v,15,8):02X} pend={bits(v,7)}")
     elif name == 'LRAM':
-        # bridge-race observer: { max_latency[63:48], overlap_cnt[47:24], wr_cnt[23:12], rd_cnt[11:0] }
-        print(f"  overlap_cnt=0x{bits(v,47,24):06X} (want 0)  max_latency={bits(v,63,48)} cyc (budget 32@1x)")
-        print(f"  wr_cnt=0x{bits(v,23,12):03X} rd_cnt=0x{bits(v,11,0):03X}")
+        # deterministic sdram_lisa: { 0[63:56], refresh_cnt[55:32], 0[31:16], access_cnt[15:0] }
+        print(f"  access_cnt=0x{bits(v,15,0):04X} (climbs = serving core)  refresh_cnt=0x{bits(v,55,32):06X} (must climb)")
     elif name == 'LCPU':
         pc = bits(v,55,33) << 1
         print(f"  haltn={bits(v,63)} rstoutn={bits(v,62)} berr_cnt={bits(v,61,56)} PC~0x{pc:06X} asn={bits(v,32)}")

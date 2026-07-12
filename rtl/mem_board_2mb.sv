@@ -73,7 +73,11 @@ module mem_board_2mb(
     output logic [20:1] A_SRAM,
     input logic [15:0] DIN_SRAM,
     output logic [15:0] DOUT_SRAM,
-    output logic SRAM_BUS_DIR
+    output logic SRAM_BUS_DIR,
+    // RAM-size-inhibited RAS/CAS, exported for the deterministic SDRAM
+    // controller (sdram_lisa) which phase-locks its access to these edges.
+    output logic _RAS_SDRAM_out,
+    output logic _CAS_SDRAM_out
     );
 
     // The memory data bus is bidirectional, so we need to mux the input and output based on whether we're reading or writing
@@ -259,6 +263,8 @@ module mem_board_2mb(
         // 11 = 2MB (all RAM enabled)
     logic _CAS_sdram;
     logic _RAS_sdram;
+    assign _RAS_SDRAM_out = _RAS_sdram;
+    assign _CAS_SDRAM_out = _CAS_sdram;
     always_comb begin
         case (RAM_SEL)
             2'b00: begin // 512KB

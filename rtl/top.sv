@@ -46,6 +46,9 @@ module top(
         output logic _LDS_SRAM,
         output logic [20:1] A_SRAM,
         inout logic [15:0] D_SRAM,
+        // RAM-size-inhibited RAS/CAS for the deterministic SDRAM controller.
+        output logic _RAS_SRAM,
+        output logic _CAS_SRAM,
 
         input logic [1:0] RAM_SEL,
 
@@ -1200,7 +1203,9 @@ module top(
             .A_SRAM(A_SRAM),
             .DIN_SRAM(DIN_SRAM),
             .DOUT_SRAM(DOUT_SRAM),
-            .SRAM_BUS_DIR(SRAM_BUS_DIR)
+            .SRAM_BUS_DIR(SRAM_BUS_DIR),
+            ._RAS_SDRAM_out(_RAS_SRAM),
+            ._CAS_SDRAM_out(_CAS_SRAM)
         );
 
 endmodule
