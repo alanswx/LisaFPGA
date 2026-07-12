@@ -293,18 +293,37 @@ module emu (
     //   vid_src[15:11] = origin coarse (x16 dots; def 280 when 0)
     // Defaults (144, 20) were dialed in live from screenshots: they place the
     // origin in the content gap and centre the 720-wide picture.
-    wire [10:0] h_de_start  = (vid_src[10:0] == 11'd0) ? 11'd20  : vid_src[10:0];
+    // Video reconstruction now uses a LINE BUFFER (like the original Xilinx
+    // framebuffer approach): each line's pixels are captured into lbuf indexed
+    // by dots-from-origin (hcnt) — which de-straddles the content into one
+    // contiguous run — then read back into a FIXED DE window. The old approach
+    // fed VID straight out and tried to align a separately-generated DE window
+    // to it, which is impossible for 720 content in an ~895-dot line that
+    // straddles _HSYNC -> the ~50px left white bar. Now the horizontal offset is
+    // just the read pointer X0 (live-tunable on the LVID source) and the DE
+    // window is fixed, so no bar is possible at any offset.
+    wire [10:0] x0_read     = (vid_src[10:0] == 11'd0) ? 11'd70  : vid_src[10:0];
     wire [10:0] origin_delay= (vid_src[15:11] == 5'd0) ? 11'd144 : {vid_src[15:11], 4'b0};
 
     localparam [10:0] H_ACTIVE = 11'd720;  // active dots per line
     localparam [10:0] HS_WIDTH = 11'd64;   // regenerated HS pulse width
+    localparam [10:0] DE_START = 11'd20;   // fixed DE window start (dots from origin)
+
+    // Ping-pong line buffer (2 x 1024 x 1 bit -> one M10K). Written at the
+    // current line's dots-from-origin (hcnt); read from the OTHER half (the
+    // previous, completed line) for display.
+    (* ramstyle = "M10K" *) reg lbuf [0:2047]; // force block RAM, not registers
+    reg  wr_sel  = 1'b0;                    // buffer half being written this line
+    reg  rd_bit  = 1'b0;                    // registered pixel read-back
+    reg  de_pipe = 1'b0;                    // DE delayed to match the read latency
+    wire [10:0] rd_addr = x0_read + (hcnt - DE_START);
+    wire        in_de   = (hcnt >= DE_START) && (hcnt < DE_START + H_ACTIVE);
 
     // DE window only. HS/VS are the Lisa's RAW sync (passed through below) —
     // real pulses in the blanking that MiSTer's sync_fix + scandoubler
     // understand. (A regenerated HS confused that chain and made the scaler
     // measure an ~11px active width.)
     reg  [10:0] hcnt = 0;      // dots since line start (_HSYNC rising)
-    reg  active_h = 0;
     reg  v_active = 0;
     // Vertical active = a COUNTER of exactly V_ACTIVE lines, anchored to the
     // first line where VA_overflow deasserts (active resume), clocked by _HSYNC
@@ -345,13 +364,24 @@ module emu (
             since_hs <= since_hs + 11'd1;
         end
         // Line origin = ORIGIN_DELAY dots after _HSYNC (in the content gap).
-        if (since_hs == origin_delay) hcnt <= 11'd0;
-        else                          hcnt <= hcnt + 11'd1;
+        if (since_hs == origin_delay) begin
+            hcnt   <= 11'd0;
+            wr_sel <= ~wr_sel;                    // new line origin -> ping-pong
+        end else
+            hcnt   <= hcnt + 11'd1;
         v_active <= (vcnt < V_ACTIVE);            // exactly 364 active lines
-        active_h <= (hcnt >= h_de_start) && (hcnt < h_de_start + H_ACTIVE);
         hs_out   <= (hcnt < HS_WIDTH);            // regen HS at origin (in blank)
     end
-    assign VGA_DE_core = active_h & v_active;
+
+    // Line-buffer capture (write this line) + display read (previous line).
+    // Both gated by pixel_ce; the read is registered (1-cycle latency), and DE
+    // is delayed to match, so pixel and DE stay aligned within the fixed window.
+    always_ff @(posedge clk_sys) if (pixel_ce) begin
+        lbuf[{wr_sel, hcnt[9:0]}] <= VID_core;      // capture at dots-from-origin
+        rd_bit  <= lbuf[{~wr_sel, rd_addr[9:0]}];   // read the completed line
+        de_pipe <= in_de & v_active;
+    end
+    assign VGA_DE_core = de_pipe;
 
     // Regenerate VGA_VS: rise cleanly at a LINE BOUNDARY inside vertical blank.
     // VA_overflow marks the blank but rises mid-line, so using it (or the raw
@@ -466,8 +496,9 @@ module emu (
         .source_initial_value ("0"), .enable_metastability ("NO")
     ) u_vid_probe ( .source(vid_src), .probe(vid_dbg), .source_clk(clk_sys), .source_ena(1'b1) );
 
-    // Color palette mapping (OSD selection supported)
-    wire [7:0] gray = VID_core ? 8'hFF : 8'h00;
+    // Color palette mapping (OSD selection supported). Pixel comes from the
+    // line buffer (rd_bit), aligned to the fixed DE window.
+    wire [7:0] gray = rd_bit ? 8'hFF : 8'h00;
     wire [1:0] color_sel = status[14:13];
     reg [7:0] vga_r_val, vga_g_val, vga_b_val;
     always_comb begin
