@@ -154,7 +154,7 @@ module emu (
         "OBC,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
         "-;",
         "O34,RAM Size,512KB,1MB,1.5MB,2MB;",
-        "O56,CPU Speed,1x (5MHz),2x,3x,4x;",
+        "O56,CPU Speed,1x (5MHz),2x,3x;",
         "O7,CPU ROM,H ROM,3A ROM;",
         "O8,I/O ROM,A8 ROM,40 ROM;",
         "ODE,Screen Color,Paper White,Green CRT,Amber CRT;",
@@ -583,7 +583,8 @@ module emu (
     // is always ready in time, at 1x..4x. See rtl/sdram_lisa.sv.
     wire [23:0] sdram_refresh_cnt;
     wire [15:0] sdram_access_cnt;
-    wire [1:0]  sdram_rd_dly;   // live read-capture tuning (LRAM source)
+    wire [15:0] sdram_collide_cnt;
+    wire [1:0]  sdram_src;      // LRAM source: [0]=ref_mode (0 legacy,1 safe)
 
     sdram_lisa sdram_i (
         .SDRAM_DQ(SDRAM_DQ),
@@ -610,21 +611,24 @@ module emu (
         .wrh(sdram_wrh),
         .din(D_SRAM),
         .dout(sdram_dout),
-        .rd_dly(sdram_rd_dly),
+        .rd_dly(2'b00),                 // proven-correct read capture
+        .ref_mode(sdram_src[0]),        // A/B: 0=legacy burst, 1=slot-boundary safe
         .refresh_cnt(sdram_refresh_cnt),
-        .access_cnt(sdram_access_cnt)
+        .access_cnt(sdram_access_cnt),
+        .collide_cnt(sdram_collide_cnt)
     );
 
-    // DEBUG (ISSP "LRAM"): deterministic-controller liveness + read-timing tune.
-    //   source[1:0] = rd_dly : extra clk past CL for the read capture (sweep 0..3)
+    // DEBUG (ISSP "LRAM"): deterministic-controller liveness + refresh A/B test.
+    //   source[0] = ref_mode : 0 = legacy rashi burst, 1 = slot-boundary-safe
     //   access_cnt[15:0]  - completed SDRAM accesses (climbs = serving the core)
+    //   collide_cnt[15:0] - dropped accesses (ras_fall while FSM busy; want 0)
     //   refresh_cnt[23:0] - AUTO_REFRESH issued (must keep climbing ~1/600 clk)
-    wire [63:0] ram_dbg = { 8'd0, sdram_refresh_cnt, 16'd0, sdram_access_cnt };
+    wire [63:0] ram_dbg = { 8'd0, sdram_refresh_cnt, sdram_collide_cnt, sdram_access_cnt };
     altsource_probe #(
         .sld_auto_instance_index ("YES"), .sld_instance_index (0),
         .instance_id ("LRAM"), .probe_width (64), .source_width (2),
-        .source_initial_value ("0"), .enable_metastability ("NO")
-    ) u_ram_probe ( .source(sdram_rd_dly), .probe(ram_dbg), .source_clk(clk_sys), .source_ena(1'b1) );
+        .source_initial_value ("1"), .enable_metastability ("NO")
+    ) u_ram_probe ( .source(sdram_src), .probe(ram_dbg), .source_clk(clk_sys), .source_ena(1'b1) );
 
     // Keyboard Adaptor
     wire [7:0] hid_key_code;
@@ -919,7 +923,9 @@ module emu (
         ._RESET(),
         ._NMISW(1'b1), // NMI switch normally open (high)
 
-        .SPEED_SEL(status[6:5]),
+        // 4x (== 2'b11) is unstable (memory cycle 1 clk short) — clamp to 3x so a
+        // stale config word or OSD wrap can never select it.
+        .SPEED_SEL(status[6:5] == 2'b11 ? 2'b10 : status[6:5]),
         .CPU_ROM_SEL(status[7]),
         .IO_ROM_SEL(status[8]),
         .usbclk_en(usbclk_en),

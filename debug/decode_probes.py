@@ -24,8 +24,8 @@ for line in sys.stdin:
     elif name == 'LMOU':
         print(f"  pkt_cnt={bits(v,63,48)} rep_cnt={bits(v,47,32)} dx=0x{bits(v,31,24):02X} dy=0x{bits(v,23,16):02X} flags=0x{bits(v,15,8):02X} pend={bits(v,7)}")
     elif name == 'LRAM':
-        # deterministic sdram_lisa: { 0[63:56], refresh_cnt[55:32], 0[31:16], access_cnt[15:0] }
-        print(f"  access_cnt=0x{bits(v,15,0):04X} (climbs = serving core)  refresh_cnt=0x{bits(v,55,32):06X} (must climb)")
+        # deterministic sdram_lisa: { 0[63:56], refresh_cnt[55:32], collide_cnt[31:16], access_cnt[15:0] }
+        print(f"  access_cnt=0x{bits(v,15,0):04X} (climbs = serving core)  collide_cnt=0x{bits(v,31,16):04X} (dropped, want 0)  refresh_cnt=0x{bits(v,55,32):06X} (must climb)")
     elif name == 'LCPU':
         pc = bits(v,55,33) << 1
         print(f"  haltn={bits(v,63)} rstoutn={bits(v,62)} berr_cnt={bits(v,61,56)} PC~0x{pc:06X} asn={bits(v,32)}")

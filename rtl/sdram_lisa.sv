@@ -56,9 +56,11 @@ module sdram_lisa
 	output reg [15:0] dout,        // read data (valid within the memory cycle)
 
 	input       [1:0] rd_dly,      // read-capture tuning (extra clk past CL)
+	input             ref_mode,    // 0 = legacy rashi burst, 1 = slot-boundary safe
 
 	output reg [23:0] refresh_cnt, // diagnostics
-	output reg [15:0] access_cnt
+	output reg [15:0] access_cnt,
+	output reg [15:0] collide_cnt  // ras_fall arriving while FSM busy (dropped access)
 );
 
 assign SDRAM_nCS  = 0;
@@ -116,7 +118,10 @@ wire ras_rise = ~ras_d & ras_n;
 wire cas_low  = ~cas_n & ~cas_d;
 
 reg [9:0] rfs_cnt = 0;
-reg       rfs = 0;
+reg [7:0] rfs_pending = 0;   // refreshes owed; burst-drained during idle gaps so
+                             // sustained load (active video + busy CPU) can't
+                             // starve refresh -> RAM decay -> screen interference
+reg       ref_fire;          // a refresh is being issued this cycle
 // Gap length in DOTCK cycles that RAS has been high. A brief inter-access gap
 // is exactly 3 dotck (RAS high T5..T7); a genuine idle gap (blanking / idle
 // slot) is >=11 dotck. Only refresh when rashi>=4 -> guaranteed a long idle
@@ -125,14 +130,60 @@ reg       rfs = 0;
 // separates 1x's 12-clk brief gap from 4x's 11-clk idle gap).
 reg [3:0] rashi = 0;
 
+// ---- Slot-phase tracker (ref_mode=1) ---------------------------------------
+// The Lisa memory cycle is a fixed 8-DOTCK slot; RAS falls at the slot boundary
+// (T0, phase 0). sphase counts DOTCK within the slot and is RESYNCED to 0 on
+// every ras_fall, so during a long idle stretch (blanking / idle slots) it still
+// predicts the boundaries where the NEXT access could begin. boundary_idle
+// pulses when a full slot elapses with RAS high (an idle slot boundary): at that
+// instant the next possible ras_fall is a full 8 DOTCK away -> a refresh issued
+// now has guaranteed headroom for tRFC at 1x/2x/3x. ref_req latches that intent
+// until a refresh is issued (or an access preempts it).
+reg [2:0] sphase = 0;
+reg       boundary_idle = 0;
+reg       ref_req = 0;
+
+// Access latch: a ras_fall that arrives while the FSM is busy (mid-refresh, from
+// a cadence disruption like an interrupt) is REMEMBERED here instead of being
+// silently dropped. The Lisa holds addr/RAS/CAS stable for the whole memory
+// cycle, so once the refresh finishes we service the still-pending access a few
+// clk late -> read data is still delivered before the Lisa latches it (ample
+// slack at 1x/2x). This makes refresh collisions invisible rather than fatal.
+reg       acc_pend = 0;
+
 always @(posedge clk) begin
 	ras_d <= ras_n;
 	cas_d <= cas_n;
-	rfs_cnt <= rfs_cnt + 1'd1;
-	if (rfs_cnt == 10'd600) begin rfs <= 1; rfs_cnt <= 0; end
+	ref_fire = 1'b0;                                          // set below on issue
 
 	if (!ras_n)          rashi <= 4'd0;                        // access -> reset
 	else if (dotck_en)   rashi <= (rashi < 4'd15) ? rashi + 1'd1 : 4'd15;
+
+	// slot phase: resync on ras_fall (= boundary), else advance per DOTCK. A full
+	// wrap (7->0) with RAS still high marks an idle slot boundary.
+	boundary_idle <= 1'b0;
+	if (ras_fall) begin
+		sphase <= 3'd0;
+	end else if (dotck_en) begin
+		if (sphase == 3'd7) begin
+			sphase <= 3'd0;
+			if (ras_n) boundary_idle <= 1'b1;             // idle slot completed
+		end else sphase <= sphase + 1'd1;
+	end
+
+	// arm the refresh request at a safe boundary; an access always preempts it.
+	// (the S_IDLE issue below clears it when a refresh actually fires.)
+	if (ras_fall)             ref_req <= 1'b0;
+	else if (boundary_idle)   ref_req <= 1'b1;
+
+	// access latch: remember any ras_fall; cleared when we begin serving it
+	// (S_ACT_ISSUE, below) or if the Lisa ends the cycle first (ras_rise).
+	if (ras_fall)      acc_pend <= 1'b1;
+	else if (ras_rise) acc_pend <= 1'b0;
+
+	// diagnostic: ras_fall that arrived while busy -> RECOVERED via the latch
+	// (served late, not dropped). Non-zero during interrupts/boot is expected now.
+	if (ras_fall && st != S_IDLE) collide_cnt <= collide_cnt + 1'd1;
 
 	// default command = NOP, no data drive
 	{SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_NOP;
@@ -141,7 +192,7 @@ always @(posedge clk) begin
 	SDRAM_DQ <= 16'bz;
 
 	if (!normal) begin
-		st <= S_IDLE; tcnt <= 0; rfs <= 0;
+		st <= S_IDLE; tcnt <= 0; rfs_pending <= 0; rfs_cnt <= 0;
 		if (icnt == 4'h0) begin
 			if (mode == MODE_PRE) begin
 				{SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_PRECHARGE;
@@ -155,14 +206,22 @@ always @(posedge clk) begin
 		case (st)
 			S_IDLE: begin
 				tcnt <= 0;
-				if (ras_fall) begin
+				// Serve a fresh OR a latched (recovered-from-refresh) access. Only
+				// serve a still-live cycle (ras_n low); a pend whose cycle already
+				// ended is dropped by the ras_rise clear above.
+				// refresh_go: ref_mode=1 -> only at a phase-locked idle-slot
+				// boundary (ref_req), double-guarded by rashi>=4 (kills a 1-clk
+				// ras/dotck skew that could false-trigger on an active slot); the
+				// legacy path fires anywhere in a >3-dotck RAS-high gap (bursts).
+				if (ras_fall || (acc_pend && !ras_n)) begin
+					acc_pend <= 1'b0;              // consume; begin serving
 					st <= S_ACT_ISSUE;             // wait 1 clk for row to settle
-				end else if (rfs && rashi >= 4'd4) begin
-					// Long idle gap confirmed (>3 dotck of RAS-high): next access
-					// is >=~8 dotck away, so tRFC finishes before it (all speeds).
+				end else if (rfs_pending != 0 &&
+				             (ref_mode ? (ref_req && rashi >= 4'd4) : (rashi >= 4'd4))) begin
 					{SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_AUTO_REFRESH;
-					rfs <= 0;
+					ref_fire = 1'b1;
 					refresh_cnt <= refresh_cnt + 1'd1;
+					ref_req <= 1'b0;               // consume; re-arm at next boundary
 					st <= S_REF;
 					tcnt <= 0;
 				end
@@ -211,12 +270,27 @@ always @(posedge clk) begin
 				end
 			end
 
-			S_REF: begin                              // tRFC busy (~66ns)
+			S_REF: begin                              // tRFC busy (~60ns = 5 clk)
 				tcnt <= tcnt + 1'd1;
-				if (tcnt >= 4'd6) st <= S_IDLE;
+				// exit at tcnt>=4: AUTO_REFRESH->next ACTIVATE spans ~7 clk (>tRFC),
+				// while minimizing how long a latched access waits behind a refresh.
+				if (tcnt >= 4'd4) st <= S_IDLE;
 			end
 			default: st <= S_IDLE;
 		endcase
+	end
+
+	// Refresh backlog: one owed per ~450 clk (5.5us -> ample vs the 7.8us/row
+	// requirement); decremented when a refresh is issued. inc and dec cancel if
+	// they coincide. Burst-draining in idle gaps keeps this small under load.
+	if (normal) begin
+		if (rfs_cnt == 10'd449) begin
+			rfs_cnt <= 0;
+			if (!ref_fire && rfs_pending != 8'hff) rfs_pending <= rfs_pending + 1'd1;
+		end else begin
+			rfs_cnt <= rfs_cnt + 1'd1;
+			if (ref_fire && rfs_pending != 0)      rfs_pending <= rfs_pending - 1'd1;
+		end
 	end
 end
 
