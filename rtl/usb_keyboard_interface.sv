@@ -28,8 +28,10 @@ module usb_keyboard_interface(
     input logic       key_press_in,  // 1 = make (down), 0 = break (up)
     input logic report,              // 1-clk_sys pulse per key event
     input logic KBD_in,
-    output logic KBD_out
+    output logic KBD_out,
+    output logic caps_lock_led    // current Caps Lock state -> host keyboard LED
     );
+    assign caps_lock_led = caps_lock_state;
 
     // First, let's synchronize KBD_in to the usbclk domain to avoid metastability issues
     (* ASYNC_REG = "TRUE" *) logic KBD_in_int, KBD_in_sync;

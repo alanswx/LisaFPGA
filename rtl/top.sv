@@ -400,10 +400,24 @@ module top(
     logic ON_prev;
     logic ON_rising;
 
+    // Hold the whole machine in reset until the RTC clock-seed finishes, so the
+    // COP is seeded with the CPU/VIA idle (no boot-traffic contention on the COP
+    // bus) -- then release and let it boot with the clock already set. The COP
+    // powers on and runs independently of this reset, so there is no deadlock; a
+    // ~2s timeout guarantees boot even if no host RTC ever arrives.
+    logic        seed_reset_hold = 1'b1;
+    logic [24:0] seed_rst_tmo    = 25'd0;
     always_ff @(posedge clk_sys) begin
         if (copck2x_en) begin
             ON_prev <= ON_val;
-            _RSTSW_int <= _RSTSW & ~(ON_val & ~ON_prev); // Detect the rising edge of ON and use that plus the reset switch to reset the system
+            if (ON_val & ~ON_prev) begin
+                seed_reset_hold <= 1'b1;         // (re)assert hold at each power-on
+                seed_rst_tmo    <= 25'd0;
+            end else begin
+                if (!seed_rst_tmo[24]) seed_rst_tmo <= seed_rst_tmo + 1'b1;
+                if (rtc_seed_done | seed_rst_tmo[24]) seed_reset_hold <= 1'b0;
+            end
+            _RSTSW_int <= _RSTSW & ~(ON_val & ~ON_prev) & ~seed_reset_hold;
         end
     end
 

@@ -1476,7 +1476,7 @@ module IO_board(
         `ifdef SIMULATION
         .ck_en_i(COPCK_core_enable), // Registered enable required by the converted Verilog model.
         `else
-        .ck_en_i(COPCK_clk_enable & copck2x_en), // Preserve the validated FPGA COP clock phase.
+        .ck_en_i(COPCK_clk_enable & copck2x_en & ~cop_freeze), // freeze halts COP for clean RAM read
         `endif
         .reset_n_i(1'b1), // Other than power-on reset, which is handled internally, we never reset the COP because that would wipe the RTC
         .cko_i(1'b0), // Crystal clock mode does not use the external CKO input.
@@ -1495,8 +1495,28 @@ module IO_board(
         .so_o(DATA_QUEUED_COP), // And the SO output goes to CA1 on the VIA, which is asserted whenever the COP has data ready for the VIA
         .so_en_o(dummy_COP_SO_en),
         .sk_o(KBD_reset_COP), // SK is the keyboard reset output from the COP
-        .sk_en_o(dummy_COP_SK_en)
+        .sk_en_o(dummy_COP_SK_en),
+        // DEBUG/RTC-init: direct COP clock-RAM access
+        .dbg_ram_a_i(dbg_ram_a),
+        .dbg_ram_we_i(dbg_ram_we),
+        .dbg_ram_d_i(dbg_ram_d),
+        .dbg_ram_d_o(dbg_ram_q)
     );
+    // COP clock-RAM calibration/injection. For now: a probe sweeps dbg_ram_a
+    // (LCRAM source) and reads back the nibble dbg_ram_q, to FIND which of the 64
+    // COP RAM addresses hold the clock digits (set the clock to a known value,
+    // then sweep). Injection (dbg_ram_we) will be wired once the addresses are known.
+    wire  [6:0] lcrm_src;         // [5:0]=RAM addr, [6]=freeze the COP for a clean read
+    wire  [5:0] dbg_ram_a = lcrm_src[5:0];
+    wire        cop_freeze /*verilator public_flat_rd*/ = lcrm_src[6];
+    logic       dbg_ram_we = 1'b0;
+    logic [3:0] dbg_ram_d  = 4'd0;
+    wire  [3:0] dbg_ram_q;
+    altsource_probe #(
+        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
+        .instance_id ("LCRM"), .probe_width (4), .source_width (7),
+        .source_initial_value ("0"), .enable_metastability ("NO")
+    ) u_cram_probe ( .source(lcrm_src), .probe(dbg_ram_q), .source_clk(clk_sys), .source_ena(1'b1) );
     `endif
 
     // Now we'll do the keyboard VIA, which is another 6522 just like the parallel port VIA
@@ -1662,7 +1682,8 @@ module IO_board(
     localparam logic [3:0] RS_WAIT=4'd0, RS_LOW1=4'd1, RS_HIGH1=4'd2, RS_LOW2=4'd3,
                            RS_DRV=4'd4, RS_HOLD=4'd5, RS_GAP=4'd6, RS_DONE=4'd7,
                            RS_RD_WAIT=4'd8;   // read-back: capture COP's 0x02 reply (year byte)
-    localparam logic [15:0] RTC_HOLD_T = 16'd64;   // trailing data hold after CRDY high
+    localparam logic [15:0] RTC_HOLD_T = 16'd2048; // long trailing hold (direct-drive; the
+                                                   // COP needs the byte held well past CRDY)
     localparam logic [15:0] RTC_GAP_T  = 16'd1024; // idle gap; must exceed the 768-c16m
                                                    // extended-DDRA hold so the bus fully
                                                    // returns to 0x80 between bytes
@@ -1763,8 +1784,8 @@ module IO_board(
 
     // Route the seed through the proven extended-DDRA delivery path (same as the OS
     // SetClock, which works). Transparent when the sequencer is idle.
-    wire [7:0] KBD_via_DDRA_muxed  = seq_active ? (seq_ddra ? 8'hff : 8'h00) : KBD_via_DDRA;
-    wire [7:0] L_COP_out_int_muxed = seq_active ? seq_byte : L_COP_out_int;
+    // (seed drives L_COP_out directly below -- the extended-DDRA path is gated
+    //  by _RESET, which is asserted during the seed's reset-hold window)
 
     // DEBUG (folded into LCOP): RTC-seed sequencer visibility (was kc4..kc7).
     //   [30]done [29]started [28]rtc_valid [27:24]state [23:19]idx
@@ -1856,7 +1877,7 @@ module IO_board(
     (* ASYNC_REG = "TRUE" *) logic KBD_via_DDRA_int, KBD_via_DDRA_sync;
     always_ff @(posedge clk_sys) begin
         if (c16m_en) begin
-            KBD_via_DDRA_int <= KBD_via_DDRA_muxed;
+            KBD_via_DDRA_int <= KBD_via_DDRA;
             KBD_via_DDRA_sync <= KBD_via_DDRA_int;
         end
     end
@@ -1902,14 +1923,15 @@ module IO_board(
     logic KBD_VIA_DDRA_extended_sync_prev;
     always_ff @(posedge clk_sys) begin
       if (copck2x_en) begin
-        // The RTC seed muxes into L_COP_out_int here (KBD_via_DDRA_int is likewise
-        // muxed above), so the seed uses the SAME extended-DDRA delivery the OS
-        // SetClock uses -- the byte is latched on the DDRA-extended rising edge and
-        // held ~768 c16m after DDRA drops (the trailing hold the COP needs to latch
-        // each command). We now seed post-power, so !_RESET no longer gates this.
+        // RTC seed drives the COP L bus DIRECTLY (bypasses the extended-DDRA path,
+        // which is held cleared while !_RESET -- and _RESET is asserted during the
+        // seed's reset-hold window). seq holds each byte long past CRDY (RTC_HOLD_T)
+        // so the COP latches it. Transparent + released once seeding is done.
+        if (seq_active) begin
+            L_COP_out <= seq_ddra ? seq_byte : 8'b10000000;
         // So latch L_COP_out_int on the rising edge of the DDRA extended signal
-        if (KBD_via_DDRA_extended_sync && !KBD_VIA_DDRA_extended_sync_prev) begin
-            L_COP_out <= L_COP_out_int_muxed;
+        end else if (KBD_via_DDRA_extended_sync && !KBD_VIA_DDRA_extended_sync_prev) begin
+            L_COP_out <= L_COP_out_int;
         end else if (!KBD_via_DDRA_extended_sync) begin
             // And then when the extended signal goes low, hold L_COP_out at its default of 0x80
             L_COP_out <= 8'b10000000;

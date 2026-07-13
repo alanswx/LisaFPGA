@@ -218,6 +218,11 @@ module emu (
         .ps2_key(ps2_key),
         .ps2_mouse(ps2_mouse),
 
+        // Light the host keyboard's Caps Lock LED when the Lisa's Caps Lock is on.
+        // MiSTer LED vector is {scroll, num, caps}; we only own caps (bit 0).
+        .ps2_kbd_led_status({2'b00, caps_lock_led}),
+        .ps2_kbd_led_use(3'b001),
+
         // MiSTer host RTC (MSM6242B BCD) -> seeds the Lisa COP421 clock at boot
         .RTC(rtc_raw)
     );
@@ -676,8 +681,10 @@ module emu (
         .key_press_in(hid_key_press),
         .report(hid_report),
         .KBD_in(kbd_serial_wire),
-        .KBD_out(kbd_out_sig)
+        .KBD_out(kbd_out_sig),
+        .caps_lock_led(caps_lock_led)
     );
+    wire caps_lock_led;   // -> host keyboard Caps Lock LED via hps_io
 
     // Open-collector keyboard line as an explicit wired-AND (idle high): the
     // Lisa side (COP/VIA via top) and our USB keyboard adapter each pull it low.
