@@ -1340,6 +1340,57 @@ struct CrashTraceEntry {
 	uint8_t signals; // reset_n, halted, berr_n, bust_n, addrerr
 };
 
+// DEBUG (#10 COP misdecode): trace the byte-level keyboard flow during power-up
+// -- what the ADAPTER sends (lisa_keycode when a send starts) vs what the COP
+// DELIVERS (L_COP_in). If the adapter only ever emits 0x80,0xBF but the COP
+// delivers 0x85,0x87,0x80,0xBF, the COP is misdecoding; if the adapter itself
+// emits 0x85,0x87, the fault is upstream.
+static void TraceCopKbd()
+{
+	if (main_time > 100000000ULL) return;
+	static uint8_t p_kstate = 0xff, p_lin = 0xff;
+	static uint32_t p_wr = 0xffffffff;
+	uint8_t kstate = VERTOPINTERN->emu__DOT__kbd_adapter_i__DOT__kbd_state;
+	uint8_t lkc    = VERTOPINTERN->emu__DOT__kbd_adapter_i__DOT__lisa_keycode;
+	uint8_t lin    = VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__dbg_l_in_last;
+	uint32_t wr    = VERTOPINTERN->emu__DOT__kbd_adapter_i__DOT__wr_ptr;
+	uint32_t rd    = VERTOPINTERN->emu__DOT__kbd_adapter_i__DOT__rd_ptr;
+	// kbd_state 3 == SEND_START_BIT in the enum (IDLE=0,WAIT_FOR_HIGH=1,
+	// WAIT_TO_SEND=2,SEND_START_BIT=3,...): log the byte at the start of a send.
+	if (kstate != p_kstate) {
+		if (kstate == 3)
+			fprintf(stderr, "KBD t=%llu ADAPTER send byte=0x%02x (rd_ptr=%u wr_ptr=%u)\n",
+				(unsigned long long)main_time, lkc, rd, wr);
+		p_kstate = kstate;
+	}
+	if (wr != p_wr) {
+		fprintf(stderr, "KBD t=%llu FIFO push -> wr_ptr=%u (rd_ptr=%u)\n",
+			(unsigned long long)main_time, wr, rd);
+		p_wr = wr;
+	}
+	if (lin != p_lin) {
+		fprintf(stderr, "COP t=%llu delivered L_COP_in=0x%02x mux_sel=%u data_out=%u cop_pc=0x%03x\n",
+			(unsigned long long)main_time, lin,
+			VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__KBD_mouse_mux_sel,
+			VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__KBD_mouse_data_out,
+			VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__cop421__DOT__pm_addr_s);
+		p_lin = lin;
+	}
+	// Also sample the mux scan the COP performs (which 2-bit lanes it reads),
+	// once per ~2M main_time in the pre-delivery window, to see if it reads
+	// garbage mouse/keyboard bits before it emits the first code.
+	static uint64_t p_sample = 0;
+	if (main_time >= 60000000ULL && main_time - p_sample >= 500000ULL) {
+		p_sample = main_time;
+		fprintf(stderr, "SCAN t=%llu mux_sel=%u data_out=%u cop_pc=0x%03x lin=0x%02x\n",
+			(unsigned long long)main_time,
+			VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__KBD_mouse_mux_sel,
+			VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__KBD_mouse_data_out,
+			VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__cop421__DOT__pm_addr_s,
+			lin);
+	}
+}
+
 static bool ObserveCrashTrace()
 {
 	static constexpr size_t trace_size = 256;
@@ -1551,6 +1602,7 @@ int verilate() {
 				bus.BeforeEval();
 			}
 			top->eval();
+			TraceCopKbd();
 			if (!MaybePatchFullRamTest()) {
 				headless_stop_requested = true;
 			}

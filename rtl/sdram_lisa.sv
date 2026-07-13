@@ -56,11 +56,9 @@ module sdram_lisa
 	output reg [15:0] dout,        // read data (valid within the memory cycle)
 
 	input       [1:0] rd_dly,      // read-capture tuning (extra clk past CL)
-	input             ref_mode,    // 0 = legacy rashi burst, 1 = slot-boundary safe
 
 	output reg [23:0] refresh_cnt, // diagnostics
-	output reg [15:0] access_cnt,
-	output reg [15:0] collide_cnt  // ras_fall arriving while FSM busy (dropped access)
+	output reg [15:0] access_cnt
 );
 
 assign SDRAM_nCS  = 0;
@@ -181,10 +179,6 @@ always @(posedge clk) begin
 	if (ras_fall)      acc_pend <= 1'b1;
 	else if (ras_rise) acc_pend <= 1'b0;
 
-	// diagnostic: ras_fall that arrived while busy -> RECOVERED via the latch
-	// (served late, not dropped). Non-zero during interrupts/boot is expected now.
-	if (ras_fall && st != S_IDLE) collide_cnt <= collide_cnt + 1'd1;
-
 	// default command = NOP, no data drive
 	{SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_NOP;
 	SDRAM_A  <= 13'd0;
@@ -209,15 +203,13 @@ always @(posedge clk) begin
 				// Serve a fresh OR a latched (recovered-from-refresh) access. Only
 				// serve a still-live cycle (ras_n low); a pend whose cycle already
 				// ended is dropped by the ras_rise clear above.
-				// refresh_go: ref_mode=1 -> only at a phase-locked idle-slot
-				// boundary (ref_req), double-guarded by rashi>=4 (kills a 1-clk
-				// ras/dotck skew that could false-trigger on an active slot); the
-				// legacy path fires anywhere in a >3-dotck RAS-high gap (bursts).
+				// Refresh only at a phase-locked idle-slot boundary (ref_req),
+				// double-guarded by rashi>=4 (kills a 1-clk ras/dotck skew that
+				// could false-trigger on an active slot).
 				if (ras_fall || (acc_pend && !ras_n)) begin
 					acc_pend <= 1'b0;              // consume; begin serving
 					st <= S_ACT_ISSUE;             // wait 1 clk for row to settle
-				end else if (rfs_pending != 0 &&
-				             (ref_mode ? (ref_req && rashi >= 4'd4) : (rashi >= 4'd4))) begin
+				end else if (rfs_pending != 0 && ref_req && rashi >= 4'd4) begin
 					{SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} <= CMD_AUTO_REFRESH;
 					ref_fire = 1'b1;
 					refresh_cnt <= refresh_cnt + 1'd1;

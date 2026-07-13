@@ -1,5 +1,5 @@
 import websocket, sys, time
-url="ws://192.168.1.196:8182/api/ws"
+url="ws://<DE10_IP>:8182/api/ws"
 ws=websocket.create_connection(url, timeout=5)
 ws.settimeout(0.5)
 # drain greeting

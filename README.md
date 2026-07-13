@@ -8,9 +8,9 @@ This is a port of **[alexthecat123's LisaFPGA](https://github.com/alexthecat123/
 — an incredible chip‑for‑chip Lisa recreation originally built for a custom
 Xilinx Artix‑7 board — to the MiSTer framework. **All of the credit for the Lisa
 core itself goes to Alex**; this repository adapts that work to run on MiSTer
-hardware (Quartus / Cyclone V, MiSTer video/audio/HPS I/O, and SDRAM). If you
-want the original standalone board, its detailed documentation is preserved here
-in [`README_LisaFPGA_hardware.md`](README_LisaFPGA_hardware.md).
+hardware (Quartus / Cyclone V, MiSTer video/audio/HPS I/O, and SDRAM). For the
+original standalone board and its detailed documentation, see
+[alexthecat123's LisaFPGA repo](https://github.com/alexthecat123/LisaFPGA).
 
 The core simulates the real Lisa hardware: the Motorola 68000 (fx68k), the
 6504 + COP421 I/O and keyboard microcontrollers, the 6522 VIAs, the Z8530 SCC,

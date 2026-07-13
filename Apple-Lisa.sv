@@ -146,7 +146,7 @@ module emu (
     // OSD / Config String Definition
     `include "build_id.v"
     localparam CONF_STR = {
-        "LISA;UART115200;",
+        "Apple-Lisa;UART115200;",
         "-;",
         "S0,IMGVHD,Mount Hard Disk;",
         "-;",
@@ -607,8 +607,6 @@ module emu (
     // is always ready in time, at 1x..4x. See rtl/sdram_lisa.sv.
     wire [23:0] sdram_refresh_cnt;
     wire [15:0] sdram_access_cnt;
-    wire [15:0] sdram_collide_cnt;
-    wire [1:0]  sdram_src;      // LRAM source: [0]=ref_mode (0 legacy,1 safe)
 
     sdram_lisa sdram_i (
         .SDRAM_DQ(SDRAM_DQ),
@@ -636,23 +634,9 @@ module emu (
         .din(D_SRAM),
         .dout(sdram_dout),
         .rd_dly(2'b00),                 // proven-correct read capture
-        .ref_mode(sdram_src[0]),        // A/B: 0=legacy burst, 1=slot-boundary safe
         .refresh_cnt(sdram_refresh_cnt),
-        .access_cnt(sdram_access_cnt),
-        .collide_cnt(sdram_collide_cnt)
+        .access_cnt(sdram_access_cnt)
     );
-
-    // DEBUG (ISSP "LRAM"): deterministic-controller liveness + refresh A/B test.
-    //   source[0] = ref_mode : 0 = legacy rashi burst, 1 = slot-boundary-safe
-    //   access_cnt[15:0]  - completed SDRAM accesses (climbs = serving the core)
-    //   collide_cnt[15:0] - dropped accesses (ras_fall while FSM busy; want 0)
-    //   refresh_cnt[23:0] - AUTO_REFRESH issued (must keep climbing ~1/600 clk)
-    wire [63:0] ram_dbg = { 8'd0, sdram_refresh_cnt, sdram_collide_cnt, sdram_access_cnt };
-    altsource_probe #(
-        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
-        .instance_id ("LRAM"), .probe_width (64), .source_width (2),
-        .source_initial_value ("1"), .enable_metastability ("NO")
-    ) u_ram_probe ( .source(sdram_src), .probe(ram_dbg), .source_clk(clk_sys), .source_ena(1'b1) );
 
     // Keyboard Adaptor
     wire [7:0] hid_key_code;

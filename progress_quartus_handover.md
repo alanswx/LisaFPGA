@@ -114,13 +114,13 @@ bugs exposed on the first hardware boot (the core had only ever been simulated).
 # Fast syntax check only (~1 min): quartus_map --read_settings_files=on --write_settings_files=off Lisa -c Lisa
 
 # Deploy the .rbf to the MiSTer and launch it via the Remote API
-sshpass -p 1 scp -o StrictHostKeyChecking=no output_files/Lisa.rbf root@192.168.1.196:/media/fat/Lisa.rbf
-curl -s -X POST http://192.168.1.196:8182/api/launch -H "Content-Type: application/json" -d '{"path":"/media/fat/Lisa.rbf"}'
+sshpass -p <DE10_PW> scp -o StrictHostKeyChecking=no output_files/Lisa.rbf root@<DE10_IP>:/media/fat/Lisa.rbf
+curl -s -X POST http://<DE10_IP>:8182/api/launch -H "Content-Type: application/json" -d '{"path":"/media/fat/Lisa.rbf"}'
 
 # Screenshot: POST to take one, then GET it (the API downscales; OSD resolution is authoritative)
-curl -s -X POST http://192.168.1.196:8182/api/screenshots
-curl -s http://192.168.1.196:8182/api/screenshots        # list; newest path is under LISA/
-curl -s "http://192.168.1.196:8182/api/screenshots/LISA/<file>.png" -o shot.png
+curl -s -X POST http://<DE10_IP>:8182/api/screenshots
+curl -s http://<DE10_IP>:8182/api/screenshots        # list; newest path is under LISA/
+curl -s "http://<DE10_IP>:8182/api/screenshots/LISA/<file>.png" -o shot.png
 ```
 
 You can also JTAG-program the `.sof` directly with
@@ -498,7 +498,7 @@ mounts the image into S0 — launch via the API, no user needed). Findings:
 ## Session update (2026-07-06): injection tooling + ProFile-gate diagnosis
 
 ### mrext keyboard injection (autonomous input, no user needed)
-The MiSTer Remote (mrext, http://192.168.1.196:8182) exposes a **raw websocket**
+The MiSTer Remote (mrext, http://<DE10_IP>:8182) exposes a **raw websocket**
 at `ws://…:8182/api/ws` that injects keys via Linux **uinput codes**:
 `kbd:<name>`, `kbdRaw:<code>`, `kbdRawDown:<code>`, `kbdRawUp:<code>`.
 Helper: `debug/ws_send.py "kbdRawDown:56" "kbdRawDown:4" "kbdRawUp:4" "kbdRawUp:56"`.

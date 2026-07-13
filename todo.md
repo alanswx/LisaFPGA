@@ -1,90 +1,69 @@
-# TODO
+# Apple Lisa for MiSTer — TODO
 
-## Current Status
+Task list for the MiSTer port. See `progress_quartus_handover.md` for the
+detailed engineering log and `CLAUDE.md` for architecture/build notes.
 
-The MiSTer port builds and the Verilator simulator runs headless. The active
-debug target is ProFile boot from a mounted image.
+## Done (MiSTer port)
 
-The original Xilinx LisaFPGA board supported two hard-disk paths by routing the
-Lisa parallel-port signals to either an external real ProFile connector or the
-onboard ESP32-based ESProFile emulator. The ProFile emulator was ESP32 firmware,
-not FPGA Verilog.
+- [x] Port LisaFPGA (Xilinx/Vivado) to MiSTer (Cyclone V / Quartus).
+- [x] Single-clock + clock-enable architecture (one PLL, strobed enables).
+- [x] Fix Vivado→Quartus tri-state hazards (BD_OE, keyboard, ProFile PD, D_SRAM).
+- [x] SDRAM: deterministic Lisa-cycle-locked controller (`sdram_lisa.sv`),
+      1×/2×/3× CPU speeds.
+- [x] Video raster reconstruction: clean, stable 720×364 (fixed the left white bar).
+- [x] Keyboard: USB→Lisa adapter with an event FIFO (fixed dropped keys).
+- [x] Mouse working.
+- [x] ProFile hard-disk emulation over MiSTer HPS block device (`profile.sv`).
+- [x] Boots Lisa Office System to the desktop.
+- [x] **SDRAM refresh flicker fixed** — slot-boundary refresh + access latch
+      (was dropping accesses on interrupt-driven cadence changes).
+- [x] **Removed unstable 4× speed** (menu + hardware clamp).
+- [x] **F11 = soft power on/off**; clean shutdown parks the ProFile (no disk
+      corruption on quit).
+- [x] **RTC clock seeding** from the host at boot (COP SetClock driven while the
+      CPU is held in reset, so no boot-traffic contention). Year shows 1994 for
+      2026 (inherent 16-year Lisa clock epoch).
+- [x] **Caps Lock LED** on the host USB keyboard tracks the Lisa's state.
+- [x] MiSTer README (credits alexthecat123); F11 power-off warning documented.
+- [x] Stripped the clock-debug scaffolding (COP-RAM debug port + freeze, LCRM
+      probe, 0x02 read-back, SDRAM ref_mode/collide A-B).
+- [x] Renamed project/top/OSD to **Apple-Lisa**.
 
-The MiSTer port now uses an internal SystemVerilog ProFile emulator
-(`rtl/profile.sv`) backed by MiSTer/HPS block-device signals. Verilator uses
-`verilator/sim/sim_blkdevice.cpp` as the host-side block-device service.
+## Open / next
 
-## Done Recently
+### Release prep (in progress)
+- [ ] Verify the stripped + renamed `Apple-Lisa` build boots cleanly on hardware
+      (clock, keyboard, mouse, ProFile, F11, caps lock all still work).
+- [x] Populate `Apple-Lisa_MiSTer/` release repo (source + `sys/` + `releases/`
+      rbf named `Apple-Lisa_YYYYMMDD.rbf`).
+- [ ] Decide whether to ship `verilator/` (351M with disk images) and
+      `references/` (574M) — currently excluded from the release copy.
+- No LICENSE by design (upstream LisaFPGA has none either).
 
-- Enabled 2MB RAM in the simulator so Lisa Office System can load past the
-  earlier loader memory-exhaustion failure (`10727`).
-- Fixed the Verilator block-device mount delay so `img_mounted` clears and later
-  ProFile sector requests are not blocked.
-- Reworked the Verilator block-device service to stream 256 16-bit words per
-  sector and hold `sd_ack` until `sd_rd`/`sd_wr` deasserts.
-- Fixed the block-device cycle counter width. ProFile boot begins after billions
-  of simulator cycles in the 2MB configuration, so an `int` cycle argument
-  overflowed and made the backend ignore late `sd_rd` requests.
-- Cloned ESProFile into `reference/ESProFile` for protocol comparison.
-- Matched ESProFile's 10MB spare-table identity fields for `10350592` byte
-  images by passing `img_size` into `profile.sv`.
-- Matched ESProFile read timing more closely by preloading the first status byte
-  before releasing `_BSY` for a ProFile read response.
-- Reviewed LisaEm's ProFile implementation. LisaEm normalizes ProFile media as
-  DC42 and applies `deinterleave5()` before reading that image; the local raw
-  `.image` files are already in physical ProFile order, so the RTL should not
-  apply that mapping to these files.
-- Identified Lisa ROM boot error `84` as `BADHDR`, then verified the current
-  ProFile path delivers block 0 correctly (`hdr0=00000022aaaa8200`).
-- Verified the LOS 3.0 image is already in physical ProFile interleave order:
-  `LDPROF`'s 9:1 software interleave maps the logical boot blocks to valid
-  checksummed physical blocks.
-- Verified clean simulator video through the ROM self-check window.
-- Added headless diagnostics: `--status-start`, `--stop-pc`, `--stop-start`, and
-  `--dump-rom-state`.
+### Cleanup / polish
+- [ ] Strip the remaining JTAG bring-up probes for a lean release build:
+      LDBG, LVID, LCPU, LIO, LCOP, LKBD, LMOU, LRAM, LPRO (and their threaded
+      ports). Keep all the real fixes. This frees routing/ALMs.
+- [ ] Timing closure review (currently relies on the SDC clock-group tweaks).
 
-## Active ProFile Boot Work
+### Functional bugs / features
+- [ ] **Video interference at higher CPU speeds (2×/3×)** — visible screen
+      interference/artifacts when overclocked; likely SDRAM refresh/timing margin
+      shrinking as the memory cycle shortens. Fine at 1×.
+- [ ] **Left video line** — one stray white column at the very left edge (DE
+      window / scaler edge artifact, not the line-buffer content). Cosmetic.
+- [ ] **COP keyboard misdecode (#10)** — boot COP codes read `0x85,0x87` instead
+      of `0x80`(RSTCODE)+`0xBF`(ID). It boots fine now, but this is a latent
+      keyboard↔COP serial bit-timing issue from the single-clock conversion.
+- [ ] **SCC / FPU clock-enable conversion** — both still run on raw `clk_sys`;
+      SCC serial baud rate is therefore wrong. Convert to proper clock-enables.
+- [ ] **RTC timezone** — host RTC is seeded in UTC; the Lisa clock therefore
+      shows UTC. Optional: apply a configurable local-time offset.
+- [ ] Twiggy / floppy support (upstream board feature; not ported).
+- [ ] MacWorks / other OS images validation on MiSTer.
 
-1. Run a long headless boot with:
-
-   ```sh
-   cd verilator
-   ./obj_dir/Vemu --headless --boot-profile \
-     --profile "Lisa Office System 3.0 and Workshop 3.0.image" \
-     --cycles 3800000000 \
-     --status-interval 500000000 \
-     --screenshot /tmp/lisa.ppm
-   ```
-
-2. Watch the ProFile status fields:
-
-   - `PRO{state=1b}` means `profile.sv` is in `ST_HPS_READ`.
-   - `sd_rd=001` with no `rdack` means the block-device backend or `sd_ack`
-     handoff is still suspect.
-   - advancing `rdack` means the sector read completed and the next issue is
-     likely ProFile protocol/status/data behavior.
-   - `stat0` and `hdr0` capture the first status bytes and first eight block-0
-     header bytes delivered by `profile.sv`; for the LOS 3.0 image, a correct
-     first header starts `00000022aaaa8200`.
-
-3. Current traces leave ROM block-0 validation, execute loaded ProFile boot code
-   around `0x207F34..0x207F38`, then return to ROM/monitor code. Use
-   `--stop-pc 0xFE0084 --stop-start 3300000000` to catch a loader `bootbomb`
-   jump into the ROM monitor before registers are clobbered.
-
-4. A fresh run is validating the ESProFile-style status-byte preload fix. If it
-   still returns to ROM/monitor code, the next suspect is later loaded-driver
-   ProFile status/handshake timing rather than block-0 data or spare-table
-   identity.
-
-## Hardware / Release Follow-Ups
-
-- Test the current ProFile changes on FPGA once the simulator reaches a useful
-  checkpoint or the user can try a build.
-- Strip or gate any remaining debug-only probes before a clean release build.
-- Close remaining timing warnings, especially SCC/FPU paths that still run from
-  raw `clk_sys`.
-- Restore SCC baud-rate correctness by adding proper clock enables to
-  `z8530_scc`.
-- Decide whether the ESProFile reference clone should stay untracked under
-  `reference/` or be documented as a local-only reference checkout.
+## Notes
+- Config file: OSD name changed to `Apple-Lisa`, so MiSTer now uses
+  `Apple-Lisa.cfg` (default status word still boots at 512 KB — set RAM to 2 MB
+  in the OSD, or the video fetches are CAS-inhibited).
+- Build: `quartus_sh --flow compile Apple-Lisa` from the repo root.

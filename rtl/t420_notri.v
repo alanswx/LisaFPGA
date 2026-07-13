@@ -5922,14 +5922,7 @@ module generic_ram_ena_6_4
    input  we_i,
    input  ena_i,
    input  [3:0] d_i,
-   output [3:0] d_o,
-   // DEBUG/RTC-init port: async read of any nibble (dbg_d_o = mem_q[dbg_a_i]) for
-   // calibration, plus a write that only lands when the COP itself isn't writing
-   // (single always block -> no multi-driver), used to inject the host clock.
-   input  [5:0] dbg_a_i,
-   input        dbg_we_i,
-   input  [3:0] dbg_d_i,
-   output [3:0] dbg_d_o);
+   output [3:0] d_o);
   wire n3197;
   reg [3:0] n3205; // mem_rd
   assign d_o = n3205; //(module output)
@@ -5937,20 +5930,12 @@ module generic_ram_ena_6_4
   assign n3197 = we_i & ena_i;
   /* rtl/generic_ram_ena.vhd:89:22  */
   reg [3:0] mem_q[63:0] ; // memory
-  // Synchronous 2nd read port (proper block-RAM port addressed by dbg_a_i; an
-  // async read of a block RAM does not honor the address).
-  reg [3:0] dbg_rd_r;
-  assign dbg_d_o = dbg_rd_r;
-  always @(posedge clk_i)
-    dbg_rd_r <= mem_q[dbg_a_i];
   always @(posedge clk_i)
     if (ena_i)
       n3205 <= mem_q[a_i];
   always @(posedge clk_i)
     if (n3197)
       mem_q[a_i] <= d_i;
-    else if (dbg_we_i)
-      mem_q[dbg_a_i] <= dbg_d_i;
   /* rtl/generic_ram_ena.vhd:83:5  */
   /* rtl/generic_ram_ena.vhd:86:17  */
 endmodule
@@ -10431,12 +10416,7 @@ module t420_notri
    output so_o,
    output so_en_o,
    output sk_o,
-   output sk_en_o,
-   // DEBUG/RTC-init: direct access to the COP clock/data RAM (dmem_b)
-   input  [5:0] dbg_ram_a_i,
-   input        dbg_ram_we_i,
-   input  [3:0] dbg_ram_d_i,
-   output [3:0] dbg_ram_d_o);
+   output sk_en_o);
   wire por_n_s /*verilator public_flat_rd*/;
   wire [9:0] pm_addr_s /*verilator public_flat_rd*/;
   wire [7:0] pm_data_s /*verilator public_flat_rd*/;
@@ -10503,11 +10483,7 @@ module t420_notri
     .we_i(dm_we_s),
     .ena_i(ck_en_i),
     .d_i(dm_data_from_core_s),
-    .d_o(dm_data_to_core_s),
-    .dbg_a_i(dbg_ram_a_i),
-    .dbg_we_i(dbg_ram_we_i),
-    .dbg_d_i(dbg_ram_d_i),
-    .dbg_d_o(dbg_ram_d_o));
+    .d_o(dm_data_to_core_s));
   /* rtl/t420_notri.vhd:199:3  */
   t400_por_63_6 por_b (
     .clk_i(ck_i),

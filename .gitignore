@@ -69,3 +69,7 @@ work-obj*.cf
 /verilator/sim.vcxproj.filters
 /verilator/sim.vcxproj.user
 /verilator/verilate.sh
+
+# dev workspace (not part of the core)
+references/
+Apple-Lisa_MiSTer/

@@ -12,12 +12,13 @@ A hardware-accurate Apple Lisa (1 / 2/5) implemented in FPGA, originally
 Lisa chip-for-chip: fx68k 68000, 6504/COP421 (I/O + keyboard), 6522 VIAs,
 z8530 SCC, AM9512 FPU, MMU, and the video state machine.
 
-- Top: `Lisa.sv` (the MiSTer `emu` wrapper: hps_io, video/audio out, SDRAM,
+- Top: `Apple-Lisa.sv` (the MiSTer `emu` wrapper: hps_io, video/audio out, SDRAM,
   keyboard/mouse adapters, ProFile) → `rtl/top.sv` (the Lisa machine) →
   CPU_board / IO_board / mem_board.
 - Framework: `sys/` (MiSTer sys_top, hps_io, ascal scaler, video_freak, etc.) —
   generally do NOT edit; `sys/sys_top.sdc` was tweaked (clock groups).
-- Build files: `Lisa.qsf`, `Lisa.qpf`, `files.qip` (source list).
+- Build files: `Apple-Lisa.qsf`, `Apple-Lisa.qpf`, `files.qip` (source list).
+  (Project/revision renamed Lisa → Apple-Lisa for the MiSTer-Devel release.)
 
 ## Architecture notes that bite you
 
@@ -50,32 +51,33 @@ z8530 SCC, AM9512 FPU, MMU, and the video state machine.
 ## Build / deploy / test loop
 
 ```bash
+# Project/revision is "Apple-Lisa" (top SV file Apple-Lisa.sv, module `emu`).
 # Fast syntax check (~1-2 min):
 /home/alans/intelFPGA_lite/quartus/bin/quartus_map --read_settings_files=on \
-  --write_settings_files=off Lisa -c Lisa 2>&1 | grep -E "Error|successful"
+  --write_settings_files=off Apple-Lisa -c Apple-Lisa 2>&1 | grep -E "Error|successful"
 
 # Full compile (~24 min). Run DETACHED so it survives (the other MiSTer session
 # on this box sometimes pkills quartus; nohup keeps it alive):
-nohup /home/alans/intelFPGA_lite/quartus/bin/quartus_sh --flow compile Lisa \
+nohup /home/alans/intelFPGA_lite/quartus/bin/quartus_sh --flow compile Apple-Lisa \
   > /tmp/build.log 2>&1 &
 # Watch: until grep -qE "Full Compilation was" /tmp/build.log; do sleep 30; done
 # ALWAYS run from the repo root (/home/alans/mister/LisaFPGA). Running from another
-# cwd gives "Top-level design entity Lisa is undefined". If you get a stale
+# cwd gives "Top-level design entity ... is undefined". If you get a stale
 # "entity undefined", `rm -rf db incremental_db` and rebuild.
 #
 # ROUTING CAPACITY: the design is ~90% ALMs with the debug probes. Adding a probe
 # can make it fail to ROUTE (not place) — and the fitter may thrash for HOURS
 # before giving up. If you need a new probe, FOLD it into an existing probe's
 # spare bits rather than adding a new altsource_probe instance, and/or drop a
-# probe you no longer need. Lisa.qsf has FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION
-# ALWAYS to help. Do a quick `quartus_map` syntax check (~2 min) before committing
-# to a full compile.
+# probe you no longer need. Apple-Lisa.qsf has FITTER_AGGRESSIVE_ROUTABILITY_-
+# OPTIMIZATION ALWAYS to help. Do a quick `quartus_map` syntax check (~2 min)
+# before committing to a full compile.
 
-# Deploy + launch on the DE10-Nano (192.168.1.196, SSH root/1):
-sshpass -p 1 scp -o StrictHostKeyChecking=no output_files/Lisa.rbf \
-  root@192.168.1.196:/media/fat/Lisa.rbf
-curl -s -X POST http://192.168.1.196:8182/api/launch \
-  -H "Content-Type: application/json" -d '{"path":"/media/fat/Lisa.rbf"}'
+# Deploy + launch on the DE10-Nano (<DE10_IP>, SSH root/1):
+sshpass -p <DE10_PW> scp -o StrictHostKeyChecking=no output_files/Apple-Lisa.rbf \
+  root@<DE10_IP>:/media/fat/Apple-Lisa.rbf
+curl -s -X POST http://<DE10_IP>:8182/api/launch \
+  -H "Content-Type: application/json" -d '{"path":"/media/fat/Apple-Lisa.rbf"}'
 ```
 
 ### Launch with a ProFile disk auto-mounted (MGL — no user needed)
@@ -99,17 +101,17 @@ The OSD status word defaults RAM to **512 KB**, which CAS-inhibits all video
 fetches and wedges the CPU. Write a config file directly (16-byte LE status
 word; `0x18` = status[4:3]=11 = 2 MB):
 ```bash
-sshpass -p 1 ssh root@192.168.1.196 \
+sshpass -p <DE10_PW> ssh root@<DE10_IP> \
   "printf '\x18\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' > /media/fat/config/LISA.CFG"
 ```
 
 ### Screenshots
 
 ```bash
-curl -s -X POST http://192.168.1.196:8182/api/screenshots     # take one
+curl -s -X POST http://<DE10_IP>:8182/api/screenshots     # take one
 # newest is under LISA/ in the list:
-curl -s http://192.168.1.196:8182/api/screenshots
-curl -s "http://192.168.1.196:8182/api/screenshots/LISA/<file>.png" -o shot.png
+curl -s http://<DE10_IP>:8182/api/screenshots
+curl -s "http://<DE10_IP>:8182/api/screenshots/LISA/<file>.png" -o shot.png
 ```
 The screenshot renders CLEAN only when video detection is correct; if timing is
 off it returns a color-noise thumbnail. The OSD "Video" info line
@@ -123,7 +125,7 @@ user for a photo). The `/api/screenshots` list is sorted oldest-first.
 ### Autonomous keyboard injection (mrext websocket)
 
 The MiSTer Remote (mrext, port 8182) exposes a **raw websocket** at
-`ws://192.168.1.196:8182/api/ws` that injects keys by **Linux uinput code**:
+`ws://<DE10_IP>:8182/api/ws` that injects keys by **Linux uinput code**:
 `kbd:<name>`, `kbdRaw:<code>`, `kbdRawDown:<code>`, `kbdRawUp:<code>`. Helper:
 `python3 debug/ws_send.py "kbdRawDown:56" "kbdRawDown:4" "kbdRawUp:4" "kbdRawUp:56"`.
 Codes: Alt=56, '1'=2 '2'=3 '3'=4, Enter=28, Esc=1, F12=88 (OSD). **Our adapter
@@ -193,26 +195,34 @@ System Verilator is 4.204 (too old for the fx68k structs). A working Verilator
 -Wno-BLKANDNBLK`). `Date.now`-free. The fx68k VPA testbench that exonerated the
 CPU is in the session scratchpad `fxsim/`.
 
-## Status (2026-07-07)
+## Status (2026-07-12)
 
-Boots to the "STARTUP FROM" disk selector; clean stable 720×364 video (small
-left-margin residual); keyboard + mouse work; SDRAM, error-50, tri-state bugs
-fixed.
+**Boots Lisa Office System to the desktop.** Clean stable 720×364 video (small
+left-margin residual); keyboard + mouse work; ProFile hard-disk emulation works;
+SDRAM, error-50, tri-state bugs fixed. 1×/2×/3× CPU speeds. Preparing a
+MiSTer-Devel release (project renamed **Apple-Lisa**; release repo
+`Apple-Lisa_MiSTer/`).
 
-**ProFile boot — root-caused, fix pending.** The Lisa never accesses the
-ProFile: it's stuck in the STARTUP-FROM menu, which the boot ROM reaches BEFORE
-the ProFile boot code. The menu appears because **the COP mis-decodes the
-keyboard power-up sequence** — it delivers `0x85,0x87` to the CPU instead of
-`0x80`(RSTCODE)+`0xBF`(ID) (see LCOP kc0..kc3). RSTSCAN (0xFE09F0) needs `0x80`;
-without it the leftover downstrokes reach KEYSCAN → BTMENU → menu. Ruled out:
-mouse (LMOU=0), adapter logic (sends correct 0x80/0xBF), ProFile datapath. It's
-a **keyboard↔COP serial bit-timing mis-decode** from the single-clock
-conversion. Fix = tune the keyboard/COP bit timing; **verify via LCOP kc0 →
-0x80** (then LPRO cmd_edges/max_state/rd_acks finally advance). No screen needed.
+Fixed since the last handover:
+- **SDRAM refresh flicker** — was dropping accesses when interrupt-driven cadence
+  changes defeated the refresh predictor. Fix: slot-boundary-phase refresh +
+  access latch in `sdram_lisa.sv`.
+- **4× speed removed** (unstable — memory cycle 1 clk short); menu + hardware clamp.
+- **F11 = soft power on/off** (`Apple-Lisa.sv` power logic → `_PWRSW`); clean
+  shutdown parks the ProFile.
+- **RTC clock seeds from the host** — the COP SetClock sequence
+  (`0x2C`/`0x1n`/`0x25`) is driven into the COP by an IO_board sequencer WHILE THE
+  MACHINE IS HELD IN RESET (`top.sv` gates reset release on `rtc_seed_done`), so
+  the COP bus is idle and the bytes aren't eaten by boot-ROM/OS COP traffic — that
+  contention was why every earlier attempt failed. Direct-drives `L_COP_out`
+  (extended-DDRA path is `_RESET`-gated during the hold). Clock shows UTC / year
+  1994 for 2026 (16-year Lisa epoch). Converter: `rtl/rtc_lisa.sv`.
+- **Caps Lock LED** → host USB keyboard via `hps_io.ps2_kbd_led_status`.
 
-**Other open:** final video centering; strip debug probes for release; close
-timing; SCC/FPU enable conversion. Full detail + every root cause in
-**progress_quartus_handover.md** (see the 2026-07-07 section).
+**Open (see todo.md):** COP keyboard misdecode #10 (boot codes `0x85,0x87`
+vs `0x80`+`0xBF` — latent, boots fine); SCC/FPU clock-enable/baud conversion;
+final video centering; strip remaining JTAG probes for release; timing closure;
+RTC UTC→local offset.
 
 ## Conventions
 

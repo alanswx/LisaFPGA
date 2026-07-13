@@ -23,9 +23,6 @@ for line in sys.stdin:
 
     elif name == 'LMOU':
         print(f"  pkt_cnt={bits(v,63,48)} rep_cnt={bits(v,47,32)} dx=0x{bits(v,31,24):02X} dy=0x{bits(v,23,16):02X} flags=0x{bits(v,15,8):02X} pend={bits(v,7)}")
-    elif name == 'LRAM':
-        # deterministic sdram_lisa: { 0[63:56], refresh_cnt[55:32], collide_cnt[31:16], access_cnt[15:0] }
-        print(f"  access_cnt=0x{bits(v,15,0):04X} (climbs = serving core)  collide_cnt=0x{bits(v,31,16):04X} (dropped, want 0)  refresh_cnt=0x{bits(v,55,32):06X} (must climb)")
     elif name == 'LCPU':
         pc = bits(v,55,33) << 1
         print(f"  haltn={bits(v,63)} rstoutn={bits(v,62)} berr_cnt={bits(v,61,56)} PC~0x{pc:06X} asn={bits(v,32)}")
@@ -39,11 +36,9 @@ for line in sys.stdin:
         print(f"  kv_wr_cnt={bits(v,63,56)} kv_rd_cnt={bits(v,55,48)} bd_nz=0x{bits(v,47,40):02X} vma_cnt={bits(v,39,32)}")
         print(f"  bd_at_wr=0x{bits(v,31,24):02X} kv_last_wr(IO_D@wr)=0x{bits(v,23,16):02X} pp_io_nz=0x{bits(v,15,8):02X} kv_last_addr={bits(v,7,4)}")
     elif name == 'LCOP':
-        # probe = { kc0[63:56], kc1[55:48], kc2[47:40], kc3[39:32], rtc_dbg[31:0] }
+        # probe = { kc0..kc7 }: the first 8 COPS boot codes the COP sent the CPU.
         print(f"  kc0=0x{bits(v,63,56):02X} kc1=0x{bits(v,55,48):02X} kc2=0x{bits(v,47,40):02X} kc3=0x{bits(v,39,32):02X}")
-        print(f"  RTCseed: done={bits(v,30)} started={bits(v,29)} rtc_valid={bits(v,28)} state={bits(v,27,24)} idx={bits(v,23,19)}")
-        print(f"           READBACK year=0x{bits(v,18,11):02X} (0xEE=slot14/2026 OK; 0xE0/0x00=UNSET)  crdy_edge_cnt={bits(v,7,0)}")
-        print(f"           (state 0-8=WAIT/LOW1/HIGH1/LOW2/DRV/HOLD/GAP/DONE/RD_WAIT)")
+        print(f"  kc4=0x{bits(v,31,24):02X} kc5=0x{bits(v,23,16):02X} kc6=0x{bits(v,15,8):02X} kc7=0x{bits(v,7,0):02X}")
     elif name == 'LKBD':
         print(f"  kbdsig_edges={bits(v,31,24)} kbdwire_edges={bits(v,23,16)} kbd_out_sig={bits(v,15)} kbd_wire={bits(v,14)}")
     elif name == 'LBUS':

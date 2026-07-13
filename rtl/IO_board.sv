@@ -1476,7 +1476,7 @@ module IO_board(
         `ifdef SIMULATION
         .ck_en_i(COPCK_core_enable), // Registered enable required by the converted Verilog model.
         `else
-        .ck_en_i(COPCK_clk_enable & copck2x_en & ~cop_freeze), // freeze halts COP for clean RAM read
+        .ck_en_i(COPCK_clk_enable & copck2x_en), // Preserve the validated FPGA COP clock phase.
         `endif
         .reset_n_i(1'b1), // Other than power-on reset, which is handled internally, we never reset the COP because that would wipe the RTC
         .cko_i(1'b0), // Crystal clock mode does not use the external CKO input.
@@ -1495,28 +1495,8 @@ module IO_board(
         .so_o(DATA_QUEUED_COP), // And the SO output goes to CA1 on the VIA, which is asserted whenever the COP has data ready for the VIA
         .so_en_o(dummy_COP_SO_en),
         .sk_o(KBD_reset_COP), // SK is the keyboard reset output from the COP
-        .sk_en_o(dummy_COP_SK_en),
-        // DEBUG/RTC-init: direct COP clock-RAM access
-        .dbg_ram_a_i(dbg_ram_a),
-        .dbg_ram_we_i(dbg_ram_we),
-        .dbg_ram_d_i(dbg_ram_d),
-        .dbg_ram_d_o(dbg_ram_q)
+        .sk_en_o(dummy_COP_SK_en)
     );
-    // COP clock-RAM calibration/injection. For now: a probe sweeps dbg_ram_a
-    // (LCRAM source) and reads back the nibble dbg_ram_q, to FIND which of the 64
-    // COP RAM addresses hold the clock digits (set the clock to a known value,
-    // then sweep). Injection (dbg_ram_we) will be wired once the addresses are known.
-    wire  [6:0] lcrm_src;         // [5:0]=RAM addr, [6]=freeze the COP for a clean read
-    wire  [5:0] dbg_ram_a = lcrm_src[5:0];
-    wire        cop_freeze /*verilator public_flat_rd*/ = lcrm_src[6];
-    logic       dbg_ram_we = 1'b0;
-    logic [3:0] dbg_ram_d  = 4'd0;
-    wire  [3:0] dbg_ram_q;
-    altsource_probe #(
-        .sld_auto_instance_index ("YES"), .sld_instance_index (0),
-        .instance_id ("LCRM"), .probe_width (4), .source_width (7),
-        .source_initial_value ("0"), .enable_metastability ("NO")
-    ) u_cram_probe ( .source(lcrm_src), .probe(dbg_ram_q), .source_clk(clk_sys), .source_ena(1'b1) );
     `endif
 
     // Now we'll do the keyboard VIA, which is another 6522 just like the parallel port VIA
@@ -1679,9 +1659,8 @@ module IO_board(
     // the closing 0x25, without which the COP is left stuck in clock-set mode.
     localparam logic [7:0] RTC_CMD_SET = 8'h2C; // enter set mode, power on, clk stopped
     localparam logic [7:0] RTC_CMD_GO  = 8'h25; // exit set mode, power on, timer off
-    localparam logic [3:0] RS_WAIT=4'd0, RS_LOW1=4'd1, RS_HIGH1=4'd2, RS_LOW2=4'd3,
-                           RS_DRV=4'd4, RS_HOLD=4'd5, RS_GAP=4'd6, RS_DONE=4'd7,
-                           RS_RD_WAIT=4'd8;   // read-back: capture COP's 0x02 reply (year byte)
+    localparam logic [2:0] RS_WAIT=3'd0, RS_LOW1=3'd1, RS_HIGH1=3'd2, RS_LOW2=3'd3,
+                           RS_DRV=3'd4, RS_HOLD=3'd5, RS_GAP=3'd6, RS_DONE=3'd7;
     localparam logic [15:0] RTC_HOLD_T = 16'd2048; // long trailing hold (direct-drive; the
                                                    // COP needs the byte held well past CRDY)
     localparam logic [15:0] RTC_GAP_T  = 16'd1024; // idle gap; must exceed the 768-c16m
@@ -1694,14 +1673,12 @@ module IO_board(
     logic        seq_active = 1'b0;
     logic        seq_ddra   = 1'b0;
     logic  [7:0] seq_byte   = 8'h80;
-    logic  [4:0] seq_idx    = 5'd0;   // 0..17 seed, 18 = 0x02 read-back command
+    logic  [4:0] seq_idx    = 5'd0;   // 0..17 (0x2C, 16 nibbles, 0x25)
     logic [15:0] seq_timer  = 16'd0;
     logic [15:0] seq_tmo    = 16'd0;
-    logic  [3:0] seq_state  = RS_WAIT;
+    logic  [2:0] seq_state  = RS_WAIT;
     logic        seq_started= 1'b0;
-    logic        rdy_s0 = 1'b1, rdy_s = 1'b1, rdy_prev = 1'b1;
-    logic  [7:0] crdy_edge_cnt = 8'd0;   // CRDY transitions observed (heartbeat proof)
-    logic  [7:0] rdbk0 = 8'd0;           // COP's first 0x02 reply byte = the YEAR (0xEy)
+    logic        rdy_s0 = 1'b1, rdy_s = 1'b1;
     // The COP only runs its command loop once powered on (ON=1). Seed AFTER ON,
     // after a settle delay (let the boot ROM's initial COP keyboard handshake
     // finish) and only when the VIA isn't driving the COP (KBD_via_DDRA==0), so
@@ -1709,24 +1686,22 @@ module IO_board(
     logic [21:0] on_dly = 22'd0;
     logic [11:0] quiet_cnt = 12'd0;   // sustained VIA-idle (KBD_via_DDRA==0) counter
 
-    // byte for sequence position i: 0=0x2C, 1..16=0x10|nibble(i-1), 17=0x25, 18=0x02(read)
+    // byte for sequence position i: 0=0x2C, 1..16=0x10|nibble(i-1), 17=0x25
     function automatic logic [7:0] rtc_seqbyte(input logic [4:0] i);
         logic [5:0] nsel;
         if (i == 5'd0)       rtc_seqbyte = RTC_CMD_SET;
         else if (i <= 5'd16) begin
             nsel = {1'b0, (i - 5'd1)} << 2;             // nibble idx (i-1) * 4
             rtc_seqbyte = {4'h1, rtc_nibbles[nsel +: 4]};
-        end else if (i == 5'd17) rtc_seqbyte = RTC_CMD_GO;
-        else                     rtc_seqbyte = 8'h02;   // read-clock command
+        end else             rtc_seqbyte = RTC_CMD_GO;
     endfunction
 
     wire tmo = (seq_tmo == 16'd0);
 
     always_ff @(posedge clk_sys) begin
         if (copck2x_en) begin
-            // sync CRDY into this domain; count its edges (proves the COP heartbeat)
-            rdy_s0 <= _READY_COP; rdy_s <= rdy_s0; rdy_prev <= rdy_s;
-            if (rdy_s != rdy_prev) crdy_edge_cnt <= crdy_edge_cnt + 1'b1;
+            // sync CRDY (_READY_COP) into this domain for the seed handshake
+            rdy_s0 <= _READY_COP; rdy_s <= rdy_s0;
             if (seq_tmo != 0) seq_tmo <= seq_tmo - 1'b1;
             // settle timer since the COP powered on (saturating)
             if (!ON) on_dly <= 22'd0;
@@ -1762,37 +1737,21 @@ module IO_board(
                     else begin seq_ddra<=1'b0; seq_timer<=RTC_GAP_T; seq_state<=RS_GAP; end end
                 RS_GAP:   begin seq_active<=1'b1; seq_ddra<=1'b0;   // idle 0x80, then next byte
                     if (seq_timer!=0) seq_timer<=seq_timer-1'b1;
-                    else if (seq_idx == 5'd18) begin               // 0x02 sent -> read reply
-                        seq_tmo <= RTC_TMO; seq_state <= RS_RD_WAIT;
-                    end else begin
+                    else if (seq_idx == 5'd17) seq_state <= RS_DONE;
+                    else begin
                         seq_idx  <= seq_idx + 1'b1;
                         seq_byte <= rtc_seqbyte(seq_idx + 1'b1);
                         seq_tmo  <= RTC_TMO;
                         seq_state<= RS_LOW1;
                     end end
-                RS_RD_WAIT: begin seq_active<=1'b0; seq_ddra<=1'b0; // release bus; COP drives io_l_o
-                    // capture the COP's first 0x02 reply byte (= year, 0xEy) then finish.
-                    if (DATA_QUEUED_COP) begin rdbk0 <= L_COP_in; seq_state <= RS_DONE; end
-                    else if (tmo)              seq_state <= RS_DONE;
-                    end
                 default:  begin seq_active<=1'b0; seq_ddra<=1'b0; end // RS_DONE
             endcase
         end
     end
 
     assign rtc_seed_done = (seq_state == RS_DONE);
-
-    // Route the seed through the proven extended-DDRA delivery path (same as the OS
-    // SetClock, which works). Transparent when the sequencer is idle.
-    // (seed drives L_COP_out directly below -- the extended-DDRA path is gated
+    // (the seed drives L_COP_out directly below -- the extended-DDRA path is gated
     //  by _RESET, which is asserted during the seed's reset-hold window)
-
-    // DEBUG (folded into LCOP): RTC-seed sequencer visibility (was kc4..kc7).
-    //   [30]done [29]started [28]rtc_valid [27:24]state [23:19]idx
-    //   [18:11]readback(COP 0x02 reply = YEAR 0xEy; 0xEE=slot14 ok, 0xE0/00=unset)
-    //   [10:8]spare [7:0]crdy_edge_cnt
-    wire [31:0] rtc_dbg = { 1'b0, rtc_seed_done, seq_started, rtc_valid,
-                            seq_state, seq_idx, rdbk0, 3'd0, crdy_edge_cnt };
 
     // DEBUG (bring-up ISSP "LCOP", remove for release): COP<->VIA1 handshake
     // monitor. The boot ROM is stuck in ReadCOPS polling for the COP's startup
@@ -1854,10 +1813,8 @@ module IO_board(
         .instance_id ("LCOP"), .probe_width (64), .source_width (1),
         .source_initial_value ("0"), .enable_metastability ("NO")
     ) u_cop_probe ( .source(), .probe({
-        // First 4 COPS boot codes + RTC-seed sequencer state (kc4..kc7 repurposed
-        // -> rtc_dbg: [30]seed_done [29]started [28]rtc_valid [27:25]state
-        //             [24:20]idx [19:12]seq_byte [11:0]nibbles[31:20](yr,doyH,doyT))
-        kc0, kc1, kc2, kc3, rtc_dbg
+        // First 8 COPS boot codes the COP delivered to the CPU, in order.
+        kc0, kc1, kc2, kc3, kc4, kc5, kc6, kc7
     }), .source_clk(clk_sys), .source_ena(1'b1) );
     `endif
 
