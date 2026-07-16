@@ -169,8 +169,10 @@ module emu (
 
     wire profile_sd_rd;
     wire profile_sd_wr;
-    assign sd_rd = { 9'b0, profile_sd_rd };
-    assign sd_wr = { 9'b0, profile_sd_wr };
+    wire flp_sd_rd;
+    wire flp_sd_wr;
+    assign sd_rd = { 8'b0, flp_sd_rd, profile_sd_rd };   // slot1=floppy, slot0=profile
+    assign sd_wr = { 8'b0, flp_sd_wr, profile_sd_wr };
     wire profile_sd_ack = sd_ack[0];
     wire profile_img_mounted = img_mounted[0];
 
@@ -202,10 +204,44 @@ module emu (
         .img_size(img_size)
     );
 
-    // Initialize unused sd_lba and sd_buff_din
+    // Sony 3.5" 400K floppy drive (slot 1), mirrors Apple-Lisa.sv
+    wire [3:0] flp_PH;
+    wire       flp_HDS, flp_MT0, flp_MT1, flp_DR0n, flp_DR1n, flp_WRD, flp_WRQn, flp_PWM;
+    wire       flp_rda;
+    wire       flp_disk_present;
+
+    sony_drive sony_i (
+        .clk_sys(clk_sys),
+        .reset(reset),
+
+        .PH(flp_PH),
+        .HDS(flp_HDS),
+        .MT0(flp_MT0),
+        .MT1(flp_MT1),
+        ._DR0(flp_DR0n),
+        ._DR1(flp_DR1n),
+        .WRD(flp_WRD),
+        ._WRQ(flp_WRQn),
+        .rda_serial(flp_rda),
+
+        .img_mounted(img_mounted[1]),
+        .img_size(img_size),
+        .disk_present(flp_disk_present),
+
+        .sd_lba(sd_lba[1]),
+        .sd_rd(flp_sd_rd),
+        .sd_wr(flp_sd_wr),
+        .sd_ack(sd_ack[1]),
+        .sd_buff_addr(sd_buff_addr[7:0]),
+        .sd_buff_dout(sd_buff_dout),
+        .sd_buff_din(sd_buff_din[1]),
+        .sd_buff_wr(sd_buff_wr)
+    );
+
+    // Initialize unused sd_lba and sd_buff_din (slots 2..9; 0=profile, 1=floppy)
     generate
         genvar j;
-        for (j = 1; j < 10; j = j + 1) begin : unused_sd_gen
+        for (j = 2; j < 10; j = j + 1) begin : unused_sd_gen
             assign sd_lba[j] = 32'b0;
             assign sd_buff_din[j] = 16'b0;
         end
@@ -257,17 +293,17 @@ module emu (
         // Floppy (unimplemented stubs)
         .RAM_SEL(2'b11),
         .ESFLOPPY_COMM_BUS(),
-        .RDA_ESFLOPPY(1'b1),
-        .WRD_ESFLOPPY(),
+        .RDA_ESFLOPPY(flp_rda),
+        .WRD_ESFLOPPY(flp_WRD),
         .SNS_ESFLOPPY(1'b1),
-        ._WRQ_ESFLOPPY(),
-        .HDS_ESFLOPPY(),
-        .PH_ESFLOPPY(),
-        .MT1_ESFLOPPY(),
-        .MT0_ESFLOPPY(),
-        ._DR1_ESFLOPPY(),
-        ._DR0_ESFLOPPY(),
-        .PWM_ESFLOPPY(),
+        ._WRQ_ESFLOPPY(flp_WRQn),
+        .HDS_ESFLOPPY(flp_HDS),
+        .PH_ESFLOPPY(flp_PH),
+        .MT1_ESFLOPPY(flp_MT1),
+        .MT0_ESFLOPPY(flp_MT0),
+        ._DR1_ESFLOPPY(flp_DR1n),
+        ._DR0_ESFLOPPY(flp_DR0n),
+        .PWM_ESFLOPPY(flp_PWM),
         .LEFT_ESFLOPPY(1'b1),
         .OK_ESFLOPPY(1'b1),
         .RIGHT_ESFLOPPY(1'b1),

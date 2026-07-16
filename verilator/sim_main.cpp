@@ -67,6 +67,7 @@ struct SimOptions {
 	bool crash_trace = false;
 	bool dump_rom_state = false;
 	std::string profile_image = "profile.image";
+	std::string floppy_image;                 // empty => no floppy mounted
 	std::string screenshot;
 };
 
@@ -125,6 +126,14 @@ static bool ParseOptions(int argc, char** argv, SimOptions* options) {
 			options->profile_image = arg.substr(16);
 		} else if (arg.rfind("--proimage=", 0) == 0) {
 			options->profile_image = arg.substr(11);
+		} else if (arg == "--floppy" || arg == "--floppy-image") {
+			if (++i >= argc) {
+				fprintf(stderr, "%s requires an image path\n", arg.c_str());
+				return false;
+			}
+			options->floppy_image = argv[i];
+		} else if (arg.rfind("--floppy=", 0) == 0) {
+			options->floppy_image = arg.substr(9);
 		} else if (arg == "--cycles") {
 			if (++i >= argc) {
 				fprintf(stderr, "--cycles requires a count\n");
@@ -1245,6 +1254,8 @@ static void PrintHeadlessStatus()
 		"PP{prb=%02x ddrb=%02x penfall=%04x cmduedge=%04x cmdinen=%x} "
 		"PRO{state=%02x max=%02x cmd=%02x strb=%02x rdack=%02x cinrst=%x rst=%d pres=%d blk=%06x c0=%02x stat0=%08x hdr0=%016llx last=%016llx:%016llx} "
 		"sd_rd=%03x sd_wr=%03x lba0=%u mounted=%03x "
+		"FDC{pc=%04x psm=%02x} "
+		"FLP{trk=%02x regs=%04x raddr=%x ldst=%x need=%d sdrd1=%d lba1=%u encst=%x sec=%x cnt=%u flux=%d rda=%d} "
 		"BLK{cur=%d r=%d w=%d delay=%d byte=%d ack=%03x}\n",
 		(unsigned long long)main_time,
 		GetCpuPc(),
@@ -1322,6 +1333,20 @@ static void PrintHeadlessStatus()
 		top->sd_wr,
 		top->sd_lba[0],
 		top->img_mounted,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__FDC_6504__DOT__PC,
+		VERTOPINTERN->emu__DOT__core__DOT__io_board__DOT__PSM_out,
+		VERTOPINTERN->emu__DOT__sony_i__DOT__driveTrack,
+		VERTOPINTERN->emu__DOT__sony_i__DOT__driveRegs,
+		VERTOPINTERN->emu__DOT__sony_i__DOT__raddr,
+		VERTOPINTERN->emu__DOT__sony_i__DOT__ld_state,
+		VERTOPINTERN->emu__DOT__sony_i__DOT__need_load,
+		VERTOPINTERN->emu__DOT__flp_sd_rd,
+		top->sd_lba[1],
+		VERTOPINTERN->emu__DOT__sony_i__DOT__enc__DOT__state,
+		VERTOPINTERN->emu__DOT__sony_i__DOT__enc__DOT__sector,
+		VERTOPINTERN->emu__DOT__sony_i__DOT__enc__DOT__count,
+		VERTOPINTERN->emu__DOT__sony_i__DOT__flux,
+		VERTOPINTERN->emu__DOT__flp_rda,
 		blockdevice.current_disk,
 		blockdevice.reading,
 		blockdevice.writing,
@@ -1820,6 +1845,11 @@ int main(int argc, char** argv, char** env) {
 	blockdevice.img_size = &top->img_size;
 
 	blockdevice.MountDisk(options.profile_image, 0);
+
+	// Sony 400K floppy on slot 1 (DiskCopy 4.2 image). Optional.
+	if (!options.floppy_image.empty()) {
+		blockdevice.MountDisk(options.floppy_image, 1);
+	}
 
 	if (options.headless) {
 		if (!headless_screenshot_path.empty() && video.InitialiseHeadless() != 0) {

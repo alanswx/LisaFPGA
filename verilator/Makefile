@@ -60,6 +60,8 @@ V_SRC = \
 	$(RTL)/debug_issp.sv \
 	$(RTL)/dotck_mmcm.v \
 	$(RTL)/profile.sv \
+	$(RTL)/sony_drive.sv \
+	$(RTL)/sony_gcr_encoder.sv \
 	$(RTL)/ps2_to_usb_hid.sv \
 	$(RTL)/usb_keyboard_interface.sv \
 	$(RTL)/6502.v \
