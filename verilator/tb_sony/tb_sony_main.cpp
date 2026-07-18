@@ -39,8 +39,8 @@ static void sd_service() {
     // Mirrors verilator/sim/sim_blkdevice.cpp: latency, then stream 256 words
     // while sd_ack is HIGH, drop ack on completion (falling edge = done).
     if (!sd_busy) {
-        if (top->sd_rd) {
-            sd_busy = true; sd_state = 1; sd_delay = 40;
+        if (top->sd_rd || top->sd_wr) {
+            sd_busy = true; sd_state = top->sd_wr ? 3 : 1; sd_delay = 40;
             sd_bytecnt = 0; sd_lba_latched = top->sd_lba;
             top->sd_buff_wr = 0;
             top->sd_ack = 0;
@@ -52,6 +52,30 @@ static void sd_service() {
     if (sd_state == 1) {           // latency: ack low
         top->sd_ack = 0; top->sd_buff_wr = 0;
         if (--sd_delay <= 0) { sd_state = 2; sd_bytecnt = 0; }
+        return;
+    }
+    if (sd_state == 3) {           // write latency
+        top->sd_ack = 0; top->sd_buff_wr = 0;
+        if (--sd_delay <= 0) { sd_state = 4; sd_bytecnt = 0; }
+        return;
+    }
+    if (sd_state == 4) {           // write stream: ack HIGH, read din per addr
+        top->sd_ack = 1;
+        if (sd_bytecnt < 256) {
+            top->sd_buff_addr = sd_bytecnt;
+            // din is a registered read: give it 2 cycles before sampling
+            if (sd_delay < 2) { sd_delay++; return; }
+            sd_delay = 0;
+            uint64_t base = (uint64_t)sd_lba_latched * BLKSZ + sd_bytecnt * 2;
+            if (base+1 < g_img.size()) {
+                g_img[base]   = top->sd_buff_din & 0xFF;
+                g_img[base+1] = top->sd_buff_din >> 8;
+            }
+            sd_bytecnt++;
+            return;
+        }
+        top->sd_ack = 0;
+        sd_busy = false; sd_state = 0;
         return;
     }
     // stream phase: ack HIGH throughout
@@ -516,6 +540,20 @@ int main(int argc, char** argv) {
         }
         printf("  M6: wrote src sector %d into slot %d: %d/524 mismatches\n",
                src_sec, dst_sec, mism);
+        // ---- W4: wait out the settle timer + flush, then verify the IMAGE ----
+        std::vector<uint8_t> img_before = g_img;
+        ticks(900000);   // settle (815k) + flush transfers
+        int imism = 0, ichg = 0;
+        for(int t=0;t<12;t++){
+            if(g_img[409684 + dst_sec*12 + t] != g_img[409684 + src_sec*12 + t]) imism++;
+        }
+        for(int k=0;k<512;k++){
+            if(g_img[84 + dst_sec*512 + k] != g_img[84 + src_sec*512 + k]) imism++;
+        }
+        for(size_t i=0;i<g_img.size();i++) if(g_img[i]!=img_before[i]) ichg++;
+        printf("  M6-W4: image sector %d vs %d after flush: %d/524 mismatches (%d bytes changed in file)\n",
+               dst_sec, src_sec, imism, ichg);
+        CHECK(imism==0, "M6-W4: flushed sector persists byte-exact in the image");
         printf("  M6 dbg: wrq_falls=%d wrd_edges=%d gcr_total=%d marks=%d commits=%d wps=%d bytecnt=%d gcrcnt=%d denib_err=%d\n",
                (int)top->rootp->tb_sony_top__DOT__dut__DOT__wrq_falls,
                (int)top->rootp->tb_sony_top__DOT__dut__DOT__wrd_edges,
