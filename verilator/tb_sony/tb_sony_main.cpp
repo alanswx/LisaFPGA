@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
 
     top = new Vtb_sony_top;
     // init inputs
-    top->reset=1; top->PH=0x8; top->HDS=0; top->MT0=0; top->MT1=0;
+    top->reset=1; top->PH=0x8; top->HDS=0; top->MT0=0; top->MT1=0; top->WRQn=1; top->WRD=0;
     top->DR0n=1; top->DR1n=1; top->WRD=0; top->WRQn=1;
     top->img_mounted=0; top->img_size=0; top->sd_ack=0;
     top->sd_buff_addr=0; top->sd_buff_dout=0; top->sd_buff_wr=0;
@@ -459,6 +459,78 @@ int main(int argc, char** argv) {
                track, good, bad, rec.size(), top->dbg_track, top->dbg_loaded);
         char m5[64]; snprintf(m5,64,"track %d: all addr fields valid", track);
         CHECK(bad==0 && good>0, m5);
+    }
+
+    // ---- M6: WRITE path -- replay a data field on WRD, verify trackbuf ------
+    // Take the encoder-captured GCR byte stream from M4b (`gcr`, which contains
+    // a complete data field for sector `sec`), PATCH its sector byte to a
+    // different sector X, serialize it onto WRD as toggle-flux (160 clk/cell,
+    // one toggle per 1-bit at cell start) with _WRQ low, and then check that
+    // trackbuf sector X now holds sector `sec`'s tags+data.
+    printf("\n== M6: WRITE path (WRD replay -> trackbuf) ==\n");
+    {
+        // return to track 0 (gcr/exp data are from track 0)
+        int cur = top->dbg_track;
+        if(cur){ write_reg(W_DIRTN,1); for(int i=0;i<cur;i++) write_reg(W_STEP,0); ticks(900000); }
+        int dm=-1;
+        for(size_t i=0;i+3<gcr.size();i++)
+            if(gcr[i]==0xD5 && gcr[i+1]==0xAA && gcr[i+2]==0xAD){ dm=(int)i; break; }
+        CHECK(dm>=0, "M6: data mark present in captured stream");
+        int src_sec = gcr_decode(gcr[dm+3]);
+        int dst_sec = (src_sec + 3) % 12;
+        // stream = D5 AA AD [patched sect] + 699 GCR + 4 csum + trailer
+        std::vector<uint8_t> ws(gcr.begin()+dm, gcr.begin()+dm+3+1+699+4+3);
+        ws[3] = GCR6[dst_sec];
+        // serialize as toggle flux, 8 cells/byte, 160 clk/cell
+        top->WRQn = 0;
+        ticks(500);          // realistic lead-in: _WRQ asserts before flux starts
+        int lvl = 0;
+        std::vector<uint8_t> got_bytes;
+        for(size_t b=0;b<ws.size();b++){
+            for(int bit=7;bit>=0;bit--){
+                if((ws[b]>>bit)&1) lvl ^= 1;
+                top->WRD = lvl;
+                for(int c=0;c<160;c++){
+                    tick();
+                    if(top->rootp->tb_sony_top__DOT__dut__DOT__wr_byte_stb)
+                        got_bytes.push_back(top->rootp->tb_sony_top__DOT__dut__DOT__wr_byte);
+                }
+            }
+        }
+        top->WRQn = 1;
+        printf("  M6 sent[0..9]: "); for(int i=0;i<10;i++) printf("%02X ", ws[i]);
+        printf("\n  M6 got [0..9]: "); for(size_t i=0;i<10 && i<got_bytes.size();i++) printf("%02X ", got_bytes[i]);
+        printf(" (total %zu)\n", got_bytes.size());
+        ticks(2000);
+        // compare trackbuf sector dst_sec against image sector src_sec
+        int mism = 0;
+        for(int t=0;t<12;t++){
+            uint16_t w = top->rootp->tb_sony_top__DOT__dut__DOT__trackbuf[3072 + dst_sec*6 + t/2];
+            uint8_t got = (t&1) ? (w>>8) : (w&0xFF);
+            if(got != g_img[409684 + src_sec*12 + t]) mism++;
+        }
+        for(int k=0;k<512;k++){
+            uint16_t w = top->rootp->tb_sony_top__DOT__dut__DOT__trackbuf[dst_sec*256 + k/2];
+            uint8_t got = (k&1) ? (w>>8) : (w&0xFF);
+            if(got != g_img[84 + src_sec*512 + k]) mism++;
+        }
+        printf("  M6: wrote src sector %d into slot %d: %d/524 mismatches\n",
+               src_sec, dst_sec, mism);
+        printf("  M6 dbg: wrq_falls=%d wrd_edges=%d gcr_total=%d marks=%d commits=%d wps=%d bytecnt=%d gcrcnt=%d denib_err=%d\n",
+               (int)top->rootp->tb_sony_top__DOT__dut__DOT__wrq_falls,
+               (int)top->rootp->tb_sony_top__DOT__dut__DOT__wrd_edges,
+               (int)top->rootp->tb_sony_top__DOT__dut__DOT__wr_gcr_total,
+               (int)top->rootp->tb_sony_top__DOT__dut__DOT__wr_marks,
+               (int)top->rootp->tb_sony_top__DOT__dut__DOT__wr_commits,
+               (int)top->rootp->tb_sony_top__DOT__dut__DOT__wps,
+               (int)top->rootp->tb_sony_top__DOT__dut__DOT__wr_bytecnt,
+               (int)top->rootp->tb_sony_top__DOT__dut__DOT__wr_gcrcnt,
+               (int)top->rootp->tb_sony_top__DOT__dut__DOT__wr_denib_err);
+        for(int t=0;t<4;t++){
+            uint16_t w = top->rootp->tb_sony_top__DOT__dut__DOT__trackbuf[3072 + dst_sec*6 + t/2];
+            printf("  tag[%d] got %02X exp %02X\n", t, (t&1)?(w>>8):(w&0xFF), g_img[409684+src_sec*12+t]);
+        }
+        CHECK(mism==0, "M6: written sector decodes byte-exact into trackbuf");
     }
 
     printf("\n== RESULT: %s (%d failures) ==\n", g_fail? "FAIL":"PASS", g_fail);
