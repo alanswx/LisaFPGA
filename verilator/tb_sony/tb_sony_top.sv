@@ -62,6 +62,7 @@ module tb_sony_top (
         .rda_serial(rda_serial),
         .img_mounted(img_mounted),
         .img_size(img_size),
+        .img_readonly(1'b0),
         .disk_present(disk_present),
         .sd_lba(sd_lba),
         .sd_rd(sd_rd),
