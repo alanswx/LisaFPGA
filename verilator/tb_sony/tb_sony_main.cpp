@@ -408,6 +408,59 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- M5: ALL address fields per track, from the FLUX stream -------------
+    // Hardware (2026-07-17) shows addr-field checksum errors ONLY on track>=1
+    // ($4F=0 on track 0, climbing fast on track 1) while the track-1 BUFFER is
+    // byte-exact. M4b-d only ever ran at track 0, so the flux path on nonzero
+    // tracks was never simulated. Scan a full revolution's addr fields per track.
+    printf("\n== M5: all address fields per track (flux stream) ==\n");
+    for(int track : {0, 1, 2, 16}) {
+        int cur = top->dbg_track;
+        if(track > cur){ write_reg(W_DIRTN,0); for(int i=0;i<track-cur;i++) write_reg(W_STEP,0); }
+        else if(track < cur){ write_reg(W_DIRTN,1); for(int i=0;i<cur-track;i++) write_reg(W_STEP,0); }
+        ticks(900000);   // allow the track load to complete
+        set_raddr(R_RDDATA0);
+        std::vector<uint8_t> rec; rec.reserve(16384);
+        int pci=-1, cfx=0, acc=0;
+        for(long i=0; i<40000000 && rec.size()<13000; i++){
+            top->clk_sys = 0; top->eval(); sd_service();
+            top->clk_sys = 1; top->eval(); g_time++;
+            int ci = top->dbg_cellidx;
+            if(ci != pci && pci >= 0){
+                if(pci <= 7){
+                    acc = (acc<<1) | cfx;
+                    if(pci==7){ rec.push_back(acc & 0xFF); acc=0; }
+                }
+                cfx = 0;
+            }
+            pci = ci;
+            if(top->dbg_flux) cfx = 1;
+        }
+        int good=0, bad=0;
+        for(size_t i=0;i+9<rec.size();i++){
+            if(rec[i]==0xD5 && rec[i+1]==0xAA && rec[i+2]==0x96){
+                int dt=gcr_decode(rec[i+3]), ds=gcr_decode(rec[i+4]),
+                    dh=gcr_decode(rec[i+5]), df=gcr_decode(rec[i+6]),
+                    dc=gcr_decode(rec[i+7]);
+                bool ok = dt>=0&&ds>=0&&dh>=0&&df>=0&&dc>=0 &&
+                          ((dt^ds^dh^df)==dc) && dt==(track&0x3f) &&
+                          rec[i+8]==0xDE && rec[i+9]==0xAA;
+                if(ok) good++;
+                else {
+                    bad++;
+                    if(bad<=6) printf("  BAD @%zu: gcr %02X %02X %02X %02X %02X trlr %02X %02X"
+                        "  (dt=%d ds=%d dh=%d df=%d dc=%d)\n", i,
+                        rec[i+3],rec[i+4],rec[i+5],rec[i+6],rec[i+7],rec[i+8],rec[i+9],
+                        dt,ds,dh,df,dc);
+                }
+            }
+        }
+        printf("  M5 track %2d: %d good / %d bad addr fields (%zu bytes, drv_trk=%d loaded=%d)\n",
+               track, good, bad, rec.size(), top->dbg_track, top->dbg_loaded);
+        char m5[64]; snprintf(m5,64,"track %d: all addr fields valid", track);
+        CHECK(bad==0 && good>0, m5);
+    }
+
     printf("\n== RESULT: %s (%d failures) ==\n", g_fail? "FAIL":"PASS", g_fail);
     delete top;
     return g_fail ? 1 : 0;
